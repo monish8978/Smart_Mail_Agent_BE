@@ -1,0 +1,35 @@
+FROM python:3.10-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+# Keep HF/torch caches inside the image layer instead of re-downloading
+# into an anonymous volume on every container recreate.
+ENV HF_HOME=/root/.cache/huggingface
+
+WORKDIR /app
+
+# Only what embed_service.py actually needs. Deliberately NOT reusing the
+# main Dockerfile — that one carries celery/mysql/langchain/mcp and would
+# roughly double this image's size and memory footprint for no benefit.
+COPY requirements.embed.txt .
+RUN pip install --no-cache-dir -r requirements.embed.txt
+
+COPY embed_service.py .
+
+# Pre-download the model at build time so the container doesn't hit the
+# network on first boot and so `docker compose up` startup time is
+# dominated by torch import, not a cold HF Hub download.
+# NOTE: this step needs network access — do NOT set HF_HUB_OFFLINE before it,
+# or it fails with "outgoing traffic has been disabled" (nothing cached yet
+# to be offline about).
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('intfloat/multilingual-e5-small')"
+
+# Only now — AFTER the cache is populated — force offline mode for runtime.
+# This is what actually stops the earlier "HEAD huggingface.co/..." calls
+# seen in production logs at container start; setting it any earlier than
+# this in the Dockerfile breaks the build (see NOTE above).
+ENV HF_HUB_OFFLINE=1
+
+EXPOSE 8500
+
+CMD ["uvicorn", "embed_service:app", "--host", "0.0.0.0", "--port", "8500"]

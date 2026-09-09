@@ -1,0 +1,120 @@
+services:
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: mail_ai_qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    mem_limit: 512m
+    # NOTE: deliberately NO healthcheck here. The official qdrant/qdrant
+    # image ships without curl, wget, or python3 (maintainers closed a
+    # request to add curl specifically for this purpose as "not planned",
+    # citing it as unwanted attack surface) — there is no in-container
+    # exec command available to probe /healthz with. Qdrant starts in
+    # under ~1s per observed logs (unlike embed_service, which is the
+    # actual slow one), and app/vector_store.py's get_qdrant_client()
+    # already catches connection failures and degrades to the JSON
+    # fallback store — so a hard depends_on gate here isn't needed.
+
+  embed_service:
+    build:
+      context: .
+      dockerfile: Dockerfile.embed
+    container_name: mail_ai_embed_service
+    restart: unless-stopped
+    ports:
+      - "8500:8500"
+    mem_limit: 1.5g
+    # Deliberately 1 replica, no load balancer — see migration spec.
+    # An outage here degrades RAG to the JSON fallback / ticket-creation
+    # path rather than taking the whole system down.
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8500/health')\" || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  api:
+    build: .
+    container_name: mail_ai_api
+    ports:
+      - "8024:8024"
+    env_file:
+      - .env
+    environment:
+      - QDRANT_HOST=mail_ai_qdrant
+      - QDRANT_PORT=6333
+      - EMBED_SERVICE_URL=http://mail_ai_embed_service:8500
+    volumes:
+      - ./app:/app/app
+      - ./worker:/app/worker
+      - ./chroma_db:/app/chroma_db   # now only used for the JSON fallback store — keep the mount
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8024 --reload
+    mem_limit: 512m
+    depends_on:
+      redis:
+        condition: service_started
+      qdrant:
+        condition: service_started
+      embed_service:
+        condition: service_healthy
+
+  worker:
+    build: .
+    container_name: mail_ai_worker
+    command: celery -A worker.celery_worker.celery worker --loglevel=info --concurrency=1
+    env_file:
+      - .env
+    environment:
+      - QDRANT_HOST=mail_ai_qdrant
+      - QDRANT_PORT=6333
+      - EMBED_SERVICE_URL=http://mail_ai_embed_service:8500
+    volumes:
+      - ./app:/app/app
+      - ./worker:/app/worker
+      - ./chroma_db:/app/chroma_db   # shared JSON fallback path — must stay mounted in api/worker/listener together
+    mem_limit: 2g
+    depends_on:
+      redis:
+        condition: service_started
+      qdrant:
+        condition: service_started
+      embed_service:
+        condition: service_healthy
+
+  listener:
+    build: .
+    container_name: mail_ai_listener
+    command: python worker/imap_reader.py
+    env_file:
+      - .env
+    environment:
+      - QDRANT_HOST=mail_ai_qdrant
+      - QDRANT_PORT=6333
+      - EMBED_SERVICE_URL=http://mail_ai_embed_service:8500
+    volumes:
+      - ./app:/app/app
+      - ./worker:/app/worker
+      - ./chroma_db:/app/chroma_db
+    working_dir: /app
+    restart: always
+    mem_limit: 512m
+    depends_on:
+      redis:
+        condition: service_started
+      qdrant:
+        condition: service_started
+      embed_service:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    container_name: mail_ai_redis
+    mem_limit: 256m
+
+volumes:
+  qdrant_data:
