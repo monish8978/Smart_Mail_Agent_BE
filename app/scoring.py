@@ -49,6 +49,7 @@ Return ONLY a number between 0 and 100.
     try:
         res = client.chat.completions.create(
             model=resolve_model(current_client_id.get(), "llm_score"),
+            caller="llm_score",
             messages=[
                 {"role": "system", "content": "You are a strict evaluator. Return ONLY a single integer between 0 and 100. No explanation. No reasoning. No text."},
                 {"role": "user", "content": prompt}
@@ -99,17 +100,19 @@ def rule_based_penalty(reply, query):
     if len(reply.split()) < 12:
         penalty -= 20
 
-    # 🚫 Very generic phrases
-    generic_phrases = [
+    # 🚫 Very generic delay phrases when reply lacks substance
+    delay_phrases = [
         "we will get back to you",
-        "thank you for reaching out",
-        "we are looking into it"
+        "we are looking into it",
+        "our team is reviewing your request"
     ]
-    if any(p in reply_lower for p in generic_phrases):
+    if len(reply.split()) < 25 and any(p in reply_lower for p in delay_phrases):
         penalty -= 10
 
-    # 🚫 No numbers when expected (like order id)
-    if "ord" in query_lower and "ord" not in reply_lower:
+    # 🚫 Specific order ID in query but omitted in reply
+    has_order_ref_query = bool(re.search(r'\b(ord\d+|order\s*#?\s*\d+)\b', query_lower))
+    has_order_ref_reply = bool(re.search(r'\b(ord\d+|order\s*#?\s*\d+|\d{5,})\b', reply_lower))
+    if has_order_ref_query and not has_order_ref_reply:
         penalty -= 25
 
     return penalty

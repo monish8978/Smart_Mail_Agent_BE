@@ -52,6 +52,7 @@ services:
     volumes:
       - ./app:/app/app
       - ./worker:/app/worker
+      - ./tests:/app/tests
       - ./chroma_db:/app/chroma_db   # now only used for the JSON fallback store — keep the mount
     command: uvicorn app.main:app --host 0.0.0.0 --port 8024 --reload
     mem_limit: 512m
@@ -66,7 +67,7 @@ services:
   worker:
     build: .
     container_name: mail_ai_worker
-    command: celery -A worker.celery_worker.celery worker --loglevel=info --concurrency=1
+    command: celery -A worker.celery_worker.celery worker -B --schedule=/tmp/celerybeat-schedule --loglevel=info --concurrency=2
     env_file:
       - .env
     environment:
@@ -76,6 +77,7 @@ services:
     volumes:
       - ./app:/app/app
       - ./worker:/app/worker
+      - ./tests:/app/tests
       - ./chroma_db:/app/chroma_db   # shared JSON fallback path — must stay mounted in api/worker/listener together
     mem_limit: 2g
     depends_on:

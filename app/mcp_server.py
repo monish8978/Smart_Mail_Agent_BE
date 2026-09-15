@@ -1,3 +1,11 @@
+"""
+app/mcp_server.py
+
+[EXPERIMENTAL / OPTIONAL INTEGRATION]
+Model Context Protocol (MCP) server exposing platform capabilities (email accounts,
+order status, RAG knowledge, outbound mail) as tools for external MCP-compatible agents.
+"""
+
 import logging
 import os
 import sys
@@ -6,7 +14,22 @@ from typing import Any, Dict
 # Ensure project root is in path for relative imports if run as a script
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server import MCPServer
+    mcp = MCPServer("MailAIAutomationServer")
+except ImportError:
+    try:
+        from mcp.server.fastmcp import FastMCP
+        mcp = FastMCP("MailAIAutomationServer")
+    except Exception:
+        class _DummyMCP:
+            def tool(self):
+                def decorator(fn):
+                    return fn
+                return decorator
+            def run(self, *args, **kwargs):
+                pass
+        mcp = _DummyMCP()
 
 # Core platform service imports
 from app.email_credential import get_email_account, create_email_record_db
@@ -17,9 +40,6 @@ from app.mailer import send_email
 # Set up logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("mcp_server")
-
-# Initialize MCP Server
-mcp = FastMCP("MailAIAutomationServer")
 
 @mcp.tool()
 def get_email_account_tool(client_id: str) -> Dict[str, Any]:
@@ -43,18 +63,64 @@ def get_email_account_tool(client_id: str) -> Dict[str, Any]:
 @mcp.tool()
 def get_order_status_tool(client_id: str, order_id: str) -> Dict[str, Any]:
     """
-    Query the external ticket or order delivery system status for a client.
+    Query the external order or delivery system status for a client.
     
     Args:
         client_id: The client identifier.
-        order_id: The docket or ticket ID (e.g. ORD12345 or support ID).
+        order_id: The docket or order ID (e.g. ORD12345, #1001).
     """
     logger.info(f"MCP Tool call: get_order_status for client_id={client_id}, order_id={order_id}")
     try:
+        from app.connector_config import run_order_status_lookup
+        dyn_res = run_order_status_lookup(client_id=client_id, order_id=order_id)
+        if dyn_res.get("success"):
+            return dyn_res
         res = get_order_status(client_id, order_id)
         return res
     except Exception as e:
         logger.error(f"Error in get_order_status MCP tool: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@mcp.tool()
+def get_payment_status_tool(client_id: str, payment_id_or_order_id: str) -> Dict[str, Any]:
+    """
+    Query the external payment gateway or invoice system for payment status.
+    
+    Args:
+        client_id: The client identifier.
+        payment_id_or_order_id: Transaction reference, invoice ID, or order ID.
+    """
+    logger.info(f"MCP Tool call: get_payment_status for client_id={client_id}, ref={payment_id_or_order_id}")
+    try:
+        from app.connector_config import run_payment_status_lookup
+        res = run_payment_status_lookup(
+            client_id=client_id,
+            payment_id=payment_id_or_order_id,
+            order_id=payment_id_or_order_id
+        )
+        return res
+    except Exception as e:
+        logger.error(f"Error in get_payment_status MCP tool: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@mcp.tool()
+def get_ticket_status_tool(client_id: str, ticket_id: str) -> Dict[str, Any]:
+    """
+    Query the external CRM for support ticket status.
+    
+    Args:
+        client_id: The client identifier.
+        ticket_id: Support ticket ID (e.g. T-260526-00431).
+    """
+    logger.info(f"MCP Tool call: get_ticket_status for client_id={client_id}, ticket_id={ticket_id}")
+    try:
+        from app.connector_config import run_ticket_status_lookup
+        res = run_ticket_status_lookup(client_id=client_id, ticket_id=ticket_id)
+        return res
+    except Exception as e:
+        logger.error(f"Error in get_ticket_status MCP tool: {e}")
         return {"status": "error", "message": str(e)}
 
 

@@ -86,7 +86,13 @@ def _render_template(template_json: str | dict | None, context: dict) -> dict | 
                 f"Template placeholder '{{{{{key}}}}}' has no value in this "
                 f"email's context (missing or None) — cannot render."
             )
-        escaped = json.dumps(str(context[key]))[1:-1]
+        val = str(context[key])
+        if key == "subject" and (not val.strip() or val.strip().lower() in ("(no subject)", "no subject", "none", "null")):
+            body_val = str(context.get("body") or "").strip()
+            first_line = body_val.split("\n")[0].strip() if body_val else ""
+            clean_first = re.sub(r'[\r\n\t]+', ' ', first_line)[:60].strip()
+            val = clean_first if len(clean_first) >= 3 else "Support Request"
+        escaped = json.dumps(val)[1:-1]
         return escaped
 
     rendered_str = _PLACEHOLDER_RE.sub(_replace, template_json)
@@ -337,8 +343,12 @@ def execute_connector(
         expensive_values = resolve_expensive_keys(expensive_needed, body, history, old_summary) if expensive_needed else {}
 
         full_context = {**context_base, **expensive_values}
+        if "conversation_history" not in full_context or not full_context["conversation_history"]:
+            from app.context_data import format_conversation_thread
+            full_context["conversation_history"] = format_conversation_thread(history, body)
 
         rendered_body = _render_template(request_template, full_context)
+
         rendered_headers = _render_template(headers_template, full_context) or {}
 
         raw_url = config["url"]
@@ -350,7 +360,7 @@ def execute_connector(
                 f"it may have been removed from the allowlist since this config was approved."
             )
 
-        secret = decrypt_secret(config["auth_secret_encrypted"]) if config.get("auth_secret_encrypted") else None
+        secret = decrypt_secret(config["auth_secret_encrypted"], client_id=config.get("client_id")) if config.get("auth_secret_encrypted") else None
 
         request_kwargs = {"headers": dict(rendered_headers), "timeout": REQUEST_TIMEOUT_SECONDS}
         if secret:

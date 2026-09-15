@@ -3,25 +3,27 @@ import json
 import os
 import logging
 from datetime import datetime, timedelta
-from app.db import get_db
+from app.db import get_db, get_db_ctx
+from app.redis_pool import get_redis_history
 
 logger = logging.getLogger(__name__)
 
 # DB 1 — separate from Celery broker (DB 0)
-REDIS_HISTORY_URL = os.getenv("REDIS_HISTORY_URL", "redis://mail_ai_redis:6379/1")
 HISTORY_TTL       = 3600   # 1 hour sliding window
 MAX_MESSAGES      = 15     # last 15 messages kept in Redis
 
 # State expiry — after this, treat as verification_failed rather than no-state
 STATE_EXPIRY_HOURS = 2
 
-redis_client = redis.from_url(REDIS_HISTORY_URL, decode_responses=True)
+redis_client = get_redis_history()
 
 
 # ==============================
 # 🔑 Key helper
 # ==============================
-def _make_key(client_id: str, from_email: str) -> str:
+def _make_key(client_id: str, from_email: str, thread_id: str = "") -> str:
+    if thread_id:
+        return f"chat_history:{client_id}:th_{thread_id}"
     return f"chat_history:{client_id}:{from_email}"
 
 
@@ -81,34 +83,28 @@ def upsert_ticket_history(
         logger.warning("⚠️ upsert_ticket_history called with no ticket_id — skipping")
         return
 
-    db = None
     try:
-        db = get_db()
-        cursor = db.cursor()
-        _ensure_table(cursor)
+        with get_db_ctx() as db:
+            with db.cursor() as cursor:
+                _ensure_table(cursor)
 
-        cursor.execute("""
-            INSERT INTO chat_history
-                (client_id, ticket_id, customer_email, summary, priority, status)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE
-                summary    = VALUES(summary),
-                priority   = VALUES(priority),
-                status     = VALUES(status),
-                updated_at = CURRENT_TIMESTAMP
-        """, (client_id, ticket_id, customer_email, summary, priority, status))
+                cursor.execute("""
+                    INSERT INTO chat_history
+                        (client_id, ticket_id, customer_email, summary, priority, status)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        summary    = VALUES(summary),
+                        priority   = VALUES(priority),
+                        status     = VALUES(status),
+                        updated_at = CURRENT_TIMESTAMP
+                """, (client_id, ticket_id, customer_email, summary, priority, status))
 
-        db.commit()
-        logger.info(
-            f"💾 chat_history upserted — client={client_id} ticket={ticket_id} status={status}"
-        )
+                db.commit()
+                logger.info(
+                    f"💾 chat_history upserted — client={client_id} ticket={ticket_id} status={status}"
+                )
     except Exception as e:
         logger.error(f"❌ chat_history upsert failed: {e}")
-        if db:
-            db.rollback()
-    finally:
-        if db:
-            db.close()
 
 
 # ==============================
@@ -123,39 +119,97 @@ def get_ticket_history(ticket_id: str) -> dict | None:
     if not ticket_id:
         return None
 
-    db = None
     try:
-        db = get_db()
-        cursor = db.cursor()
-        _ensure_table(cursor)
+        with get_db_ctx() as db:
+            with db.cursor() as cursor:
+                _ensure_table(cursor)
 
-        cursor.execute("""
-            SELECT client_id, ticket_id, customer_email, summary, priority, status, created_at, updated_at
-            FROM chat_history
-            WHERE ticket_id = %s
-            LIMIT 1
-        """, (ticket_id,))
-        row = cursor.fetchone()
+                cursor.execute("""
+                    SELECT client_id, ticket_id, customer_email, summary, priority, status, created_at, updated_at
+                    FROM chat_history
+                    WHERE ticket_id = %s
+                    LIMIT 1
+                """, (ticket_id,))
+                row = cursor.fetchone()
 
-        if not row:
-            return None
+                if not row:
+                    return None
 
-        return {
-            "client_id":      row[0],
-            "ticket_id":      row[1],
-            "customer_email": row[2],
-            "summary":        row[3] or "",
-            "priority":       row[4] or "Normal",
-            "status":         row[5] or "NEW",
-            "created_at":     row[6].isoformat() if row[6] else "",
-            "updated_at":     row[7].isoformat() if row[7] else ""
-        }
+                return {
+                    "client_id":      row[0],
+                    "ticket_id":      row[1],
+                    "customer_email": row[2],
+                    "summary":        row[3] or "",
+                    "priority":       row[4] or "Normal",
+                    "status":         row[5] or "NEW",
+                    "created_at":     row[6].isoformat() if row[6] else "",
+                    "updated_at":     row[7].isoformat() if row[7] else ""
+                }
     except Exception as e:
         logger.error(f"❌ chat_history fetch failed: {e}")
         return None
-    finally:
-        if db:
-            db.close()
+
+
+def get_history_from_sql(client_id: str, from_email: str, thread_id: str = "", limit: int = 10) -> list:
+    """
+    Reconstructs conversation dialogue from email_logs table when Redis cache misses
+    (e.g. customer replied hours or days later after Redis TTL expired).
+    """
+    if not client_id:
+        return []
+
+    try:
+        with get_db_ctx() as db:
+            with db.cursor() as cursor:
+                if thread_id:
+                    cursor.execute("""
+                        SELECT body, reply, subject, created_at, status, summary, troubleshooting_step
+                        FROM email_logs
+                        WHERE client_id = %s AND thread_id = %s
+                          AND status NOT IN ('system_bounce_dropped', 'rate_limited', 'automation_halted')
+                        ORDER BY id DESC LIMIT %s
+                    """, (client_id, thread_id, limit))
+                else:
+                    cursor.execute("""
+                        SELECT body, reply, subject, created_at, status, summary, troubleshooting_step
+                        FROM email_logs
+                        WHERE client_id = %s AND from_email = %s
+                          AND status NOT IN ('system_bounce_dropped', 'rate_limited', 'automation_halted')
+                        ORDER BY id DESC LIMIT %s
+                    """, (client_id, from_email, limit))
+                rows = cursor.fetchall()
+                if not rows:
+                    return []
+
+                # Reverse to get chronological order (oldest to newest)
+                history = []
+                for row in reversed(rows):
+                    cust_body = row[0]
+                    support_reply = row[1]
+                    subj = row[2] or ""
+                    ts = row[3].isoformat() if row[3] else ""
+
+                    if cust_body:
+                        history.append({
+                            "role": "customer",
+                            "subject": subj,
+                            "body": cust_body,
+                            "timestamp": ts,
+                            "meta": json.dumps({"step": row[6] or 0}) if row[6] else ""
+                        })
+                    if support_reply:
+                        history.append({
+                            "role": "support",
+                            "subject": f"Re: {subj}",
+                            "body": support_reply,
+                            "timestamp": ts,
+                            "meta": json.dumps({"status": row[4], "step": row[6] or 0})
+                        })
+                logger.info(f"💾 Reconstructed {len(history)} messages from SQL email_logs (client={client_id}, thread={thread_id or from_email})")
+                return history
+    except Exception as e:
+        logger.error(f"❌ Failed to fetch history from SQL: {e}")
+        return []
 
 
 # ==============================
@@ -168,13 +222,11 @@ def push_message(
     subject: str,
     body: str,
     ticket_id: str = "",
-    meta: str = ""
+    meta: str = "",
+    thread_id: str = ""
 ):
     """
-    Write to Redis (hot cache) only.
-    MySQL long-term storage is now handled by upsert_ticket_history.
-    meta: optional JSON string encoding conversation state.
-    Pass a dict and this function will serialise it automatically.
+    Write to Redis (hot cache).
     """
     if not client_id:
         logger.warning("⚠️ push_message called with no client_id — skipping")
@@ -193,35 +245,43 @@ def push_message(
     }
 
     try:
-        key = _make_key(client_id, from_email)
+        key = _make_key(client_id, from_email, thread_id)
         redis_client.rpush(key, json.dumps(entry))
         redis_client.ltrim(key, -MAX_MESSAGES, -1)
         redis_client.expire(key, HISTORY_TTL)
         logger.info(f"✅ Redis push — key={key} role={role} meta={meta!r}")
+
+        # Also push to email key if thread_id was used, so sender-level lookups find it
+        if thread_id:
+            email_key = _make_key(client_id, from_email)
+            redis_client.rpush(email_key, json.dumps(entry))
+            redis_client.ltrim(email_key, -MAX_MESSAGES, -1)
+            redis_client.expire(email_key, HISTORY_TTL)
     except Exception as e:
         logger.error(f"❌ Redis push failed: {e}")
 
 
 # ==============================
-# 📖 Get history (Redis, cache-first)
+# 📖 Get history (Redis, cache-first, SQL fallback)
 # ==============================
 def get_history(
     client_id: str,
     from_email: str,
     last_n: int = MAX_MESSAGES,
-    ticket_id: str = ""
+    ticket_id: str = "",
+    thread_id: str = ""
 ) -> list:
     """
-    Returns Redis conversation history (oldest → newest).
-    If ticket_id is provided and a MySQL summary row exists,
-    prepends a synthetic 'context' entry so the LLM prompt
-    has long-term issue context even after Redis TTL expires.
+    Returns conversation history (oldest → newest).
+    1. Checks Redis cache using thread_id (or from_email).
+    2. If Redis is cold/empty, reconstructs history from MySQL email_logs.
+    3. If ticket_id is provided, attaches MySQL summary row.
     """
     if not client_id:
         logger.warning("⚠️ get_history called with no client_id — returning []")
         return []
 
-    key = _make_key(client_id, from_email)
+    key = _make_key(client_id, from_email, thread_id)
     history = []
 
     try:
@@ -229,8 +289,28 @@ def get_history(
         if raw:
             history = [json.loads(e) for e in raw]
             logger.info(f"⚡ Redis cache hit — key={key} count={len(history)}")
+        elif thread_id:
+            # Try from_email key in Redis before SQL
+            alt_key = _make_key(client_id, from_email)
+            raw_alt = redis_client.lrange(alt_key, -last_n, -1)
+            if raw_alt:
+                history = [json.loads(e) for e in raw_alt]
+                logger.info(f"⚡ Redis cache hit on sender key — key={alt_key} count={len(history)}")
     except Exception as e:
         logger.error(f"❌ Redis read failed: {e}")
+
+    # Fallback to MySQL email_logs if Redis cache missed (TTL expired)
+    if not history:
+        logger.info(f"🔄 Redis cache miss for {key} — querying SQL fallback...")
+        history = get_history_from_sql(client_id, from_email, thread_id, limit=last_n)
+        if history:
+            # Warm up Redis cache
+            try:
+                for entry in history:
+                    redis_client.rpush(key, json.dumps(entry))
+                redis_client.expire(key, HISTORY_TTL)
+            except Exception as w_err:
+                logger.warning(f"⚠️ Failed to re-warm Redis cache: {w_err}")
 
     # Inject MySQL summary as synthetic context entry if available
     if ticket_id:
@@ -244,7 +324,6 @@ def get_history(
                 "meta":      "",
                 "timestamp": row.get("updated_at", "")
             }
-            # Prepend so it appears before Redis messages in the prompt
             history = [summary_entry] + history
             logger.info(f"📋 Injected MySQL summary for ticket={ticket_id}")
 

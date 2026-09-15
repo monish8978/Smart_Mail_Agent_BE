@@ -26,6 +26,7 @@ QDRANT_HOST = os.getenv("QDRANT_HOST", "mail_ai_qdrant")
 QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
 COLLECTION_NAME = os.getenv("QDRANT_COLLECTION", "mail_ai_knowledge")
 VECTOR_SIZE = 384  # intfloat/multilingual-e5-small
+DEFAULT_MIN_SCORE = float(os.getenv("RAG_MIN_SCORE", "0.68"))
 
 _qdrant_client: QdrantClient | None = None
 
@@ -94,10 +95,47 @@ def ensure_collection() -> bool:
         except Exception:
             pass
 
+        # Payload full-text index on content and title for keyword / hybrid lookups
+        try:
+            client.create_payload_index(
+                collection_name=COLLECTION_NAME,
+                field_name="content",
+                field_schema=qmodels.TextIndexParams(
+                    type="text",
+                    tokenizer=qmodels.TokenizerType.WORD,
+                    lowercase=True,
+                ),
+            )
+        except Exception:
+            pass
+
+        try:
+            client.create_payload_index(
+                collection_name=COLLECTION_NAME,
+                field_name="title",
+                field_schema=qmodels.TextIndexParams(
+                    type="text",
+                    tokenizer=qmodels.TokenizerType.WORD,
+                    lowercase=True,
+                ),
+            )
+        except Exception:
+            pass
+
         return True
     except Exception as e:
         logger.error(f"❌ Failed to ensure Qdrant collection: {e}")
         return False
+
+
+def _validate_tenant_id(client_id: str, op_name: str) -> str:
+    """Enforce non-empty, non-wildcard client_id for strict multi-tenant isolation."""
+    if not client_id or not isinstance(client_id, str):
+        raise ValueError(f"Vector store operation '{op_name}' requires a valid client_id (got {client_id!r})")
+    clean_id = client_id.strip()
+    if not clean_id or clean_id.upper() == "ALL":
+        raise ValueError(f"Vector store operation '{op_name}' cannot be called with empty or 'ALL' client_id")
+    return clean_id
 
 
 def upsert_chunks(
@@ -111,6 +149,7 @@ def upsert_chunks(
     Upserts one document's worth of chunks (+ their pre-computed embeddings)
     into the shared collection, tagged with client_id / doc_id metadata.
     """
+    client_id = _validate_tenant_id(client_id, "upsert_chunks")
     client = get_qdrant_client()
     if client is None:
         return False
@@ -146,12 +185,19 @@ def upsert_chunks(
         return False
 
 
-def search(client_id: str, query_vector: list[float], top_k: int = 3) -> list[dict[str, Any]]:
+def search(
+    client_id: str,
+    query_vector: list[float],
+    top_k: int = 3,
+    min_score: float = DEFAULT_MIN_SCORE,
+) -> list[dict[str, Any]]:
     """
     Filtered ANN search scoped to client_id. Returns a list of dicts:
     [{"content": str, "title": str, "doc_id": str, "score": float, "id": str}, ...]
+    Only results with cosine score >= min_score are returned.
     Returns [] on any failure — callers treat that identically to "no matches".
     """
+    client_id = _validate_tenant_id(client_id, "search")
     client = get_qdrant_client()
     if client is None:
         return []
@@ -171,13 +217,16 @@ def search(client_id: str, query_vector: list[float], top_k: int = 3) -> list[di
         )
         out = []
         for r in response.points:
+            score = round(float(r.score), 3)
+            if score < min_score:
+                continue
             payload = r.payload or {}
             out.append({
                 "id": str(r.id),
                 "content": payload.get("content", ""),
                 "title": payload.get("title", "Untitled Document"),
                 "doc_id": payload.get("doc_id", ""),
-                "score": round(float(r.score), 3),
+                "score": score,
             })
         return out
     except Exception as e:
@@ -185,7 +234,11 @@ def search(client_id: str, query_vector: list[float], top_k: int = 3) -> list[di
         return []
 
 
-def search_all_clients(query_vector: list[float], top_k: int = 3) -> list[dict[str, Any]]:
+def search_all_clients(
+    query_vector: list[float],
+    top_k: int = 3,
+    min_score: float = DEFAULT_MIN_SCORE,
+) -> list[dict[str, Any]]:
     """Unfiltered search across all clients — used for the ALL/admin views."""
     client = get_qdrant_client()
     if client is None:
@@ -198,6 +251,9 @@ def search_all_clients(query_vector: list[float], top_k: int = 3) -> list[dict[s
         )
         out = []
         for r in response.points:
+            score = round(float(r.score), 3)
+            if score < min_score:
+                continue
             payload = r.payload or {}
             out.append({
                 "id": str(r.id),
@@ -205,7 +261,7 @@ def search_all_clients(query_vector: list[float], top_k: int = 3) -> list[dict[s
                 "title": payload.get("title", "Untitled Document"),
                 "doc_id": payload.get("doc_id", ""),
                 "client_id": payload.get("client_id", ""),
-                "score": round(float(r.score), 3),
+                "score": score,
             })
         return out
     except Exception as e:
@@ -218,6 +274,7 @@ def get_client_documents(client_id: str) -> list[dict[str, Any]]:
     Scrolls all points for a client and groups them by doc_id, mirroring
     the old Chroma get_knowledge_base() grouping behaviour.
     """
+    client_id = _validate_tenant_id(client_id, "get_client_documents")
     client = get_qdrant_client()
     if client is None:
         return []
@@ -304,6 +361,7 @@ def get_all_documents() -> list[dict[str, Any]]:
 
 def delete_document(client_id: str, doc_id: str) -> bool:
     """Deletes all chunks for a given doc_id, scoped to client_id for safety."""
+    client_id = _validate_tenant_id(client_id, "delete_document")
     client = get_qdrant_client()
     if client is None:
         return False
@@ -328,6 +386,7 @@ def delete_document(client_id: str, doc_id: str) -> bool:
 
 def delete_client_data(client_id: str) -> bool:
     """Deletes ALL points for a client — used by delete_client_account()."""
+    client_id = _validate_tenant_id(client_id, "delete_client_data")
     client = get_qdrant_client()
     if client is None:
         return False

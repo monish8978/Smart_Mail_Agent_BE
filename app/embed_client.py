@@ -21,37 +21,44 @@ import requests
 logger = logging.getLogger(__name__)
 
 EMBED_SERVICE_URL = os.getenv("EMBED_SERVICE_URL", "http://mail_ai_embed_service:8500")
-EMBED_TIMEOUT_SECONDS = 5
+EMBED_TIMEOUT_SECONDS = int(os.getenv("EMBED_TIMEOUT_SECONDS", "10"))
+
+
+BATCH_SIZE = 32
 
 
 def _post_embed(texts: list[str]) -> list[list[float]] | None:
     if not texts:
         return []
-    try:
-        resp = requests.post(
-            f"{EMBED_SERVICE_URL}/embed",
-            json={"texts": texts},
-            timeout=EMBED_TIMEOUT_SECONDS,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        vectors = data.get("vectors")
-        if not vectors or len(vectors) != len(texts):
-            logger.error(f"❌ embed_service returned malformed response: {data}")
+    all_vectors: list[list[float]] = []
+    for i in range(0, len(texts), BATCH_SIZE):
+        batch = texts[i:i + BATCH_SIZE]
+        try:
+            resp = requests.post(
+                f"{EMBED_SERVICE_URL}/embed",
+                json={"texts": batch},
+                timeout=EMBED_TIMEOUT_SECONDS,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            vectors = data.get("vectors")
+            if not vectors or len(vectors) != len(batch):
+                logger.error(f"❌ embed_service returned malformed response for batch: {data}")
+                return None
+            all_vectors.extend(vectors)
+        except requests.exceptions.Timeout:
+            logger.error(f"❌ embed_service timed out after {EMBED_TIMEOUT_SECONDS}s — degrading gracefully")
             return None
-        return vectors
-    except requests.exceptions.Timeout:
-        logger.error(f"❌ embed_service timed out after {EMBED_TIMEOUT_SECONDS}s — degrading gracefully")
-        return None
-    except requests.exceptions.ConnectionError as e:
-        logger.error(f"❌ embed_service connection failed: {e} — degrading gracefully")
-        return None
-    except requests.exceptions.HTTPError as e:
-        logger.error(f"❌ embed_service returned HTTP error: {e} — degrading gracefully")
-        return None
-    except Exception as e:
-        logger.error(f"❌ embed_service call failed unexpectedly: {e} — degrading gracefully")
-        return None
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"❌ embed_service connection failed: {e} — degrading gracefully")
+            return None
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"❌ embed_service returned HTTP error: {e} — degrading gracefully")
+            return None
+        except Exception as e:
+            logger.error(f"❌ embed_service call failed unexpectedly: {e} — degrading gracefully")
+            return None
+    return all_vectors
 
 
 def embed_passages(texts: list[str]) -> list[list[float]] | None:

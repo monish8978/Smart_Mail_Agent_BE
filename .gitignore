@@ -1,35 +1,24 @@
-# Environment / secrets
+# Environment
 .env
 .env.*
 !.env.example
 
 # Python
 __pycache__/
-*.py[cod]
+*.pyc
 *.pyo
-*.pyd
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.venv/
-venv/
-env/
+*.log
 
-# Vector DB / local storage
+# Data directories
 chroma_db/
 qdrant_storage/
 
-# Test / temporary files
-.Test_files/
-*.log
-*.tmp
-*.bak
+# Frontend build & deps
+frontend/node_modules/
+frontend/dist/
 
-# OS / editor
-.DS_Store
-Thumbs.db
-.vscode/
-.idea/
+# Redis
+dump.rdb
 
-# Generated files
-*.pyc
+# Test virtual environments
+.Test_files/venv/

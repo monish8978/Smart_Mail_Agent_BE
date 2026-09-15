@@ -11,6 +11,7 @@ Callers (app/embed_client.py) are responsible for adding the "query: " /
 them itself, so that prefix logic lives in one place and is easy to audit.
 """
 
+import asyncio
 import logging
 import time
 from fastapi import FastAPI, HTTPException
@@ -79,14 +80,17 @@ def health():
 
 
 @app.post("/embed", response_model=EmbedResponse)
-def embed(req: EmbedRequest):
+async def embed(req: EmbedRequest):
     if _model is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
     try:
         # NOTE: caller (app/embed_client.py) is responsible for the
         # "query: " / "passage: " prefix — this service embeds exactly
         # what it's given, no implicit prefixing here.
-        vectors = _model.encode(req.texts, normalize_embeddings=True).tolist()
+        # Run CPU-bound PyTorch encoding in a worker thread so Uvicorn event loop
+        # and /health checks remain completely responsive under batch load.
+        vectors_np = await asyncio.to_thread(_model.encode, req.texts, normalize_embeddings=True)
+        vectors = vectors_np.tolist()
         return {"vectors": vectors, "dim": len(vectors[0]) if vectors else 0, "model": MODEL_NAME}
     except Exception as e:
         logger.error(f"❌ Embedding failed: {e}", exc_info=True)

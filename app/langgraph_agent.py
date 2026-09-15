@@ -1,3 +1,12 @@
+"""
+app/langgraph_agent.py
+
+[EXPERIMENTAL / PROOF OF CONCEPT]
+Alternative LangGraph-based agent pipeline using MCP client adapters.
+The production pipeline executes via worker/tasks.py -> app/pipeline/dispatcher.py.
+This module is retained for experimental multi-server tool-use evaluations.
+"""
+
 import os
 import sys
 import asyncio
@@ -14,8 +23,6 @@ from langchain_openai import ChatOpenAI
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.prebuilt import create_react_agent
 
-# Set up logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("langgraph_agent")
 
 async def run_mcp_agent(client_id: str, customer_email: str, email_body: str) -> Dict[str, Any]:

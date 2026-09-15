@@ -183,12 +183,12 @@ request_url = f"{api_url}?data={encoded_data}"
 
 ## 4. How to Generate the PDF Specification
 
-A custom script has been created in the root of the workspace to compile this specification and vector-drawn state machine diagram into a premium, professional PDF report named `Email_Bot_Architecture.pdf`.
+A custom script has been created in the `scripts/` directory to compile this specification and vector-drawn state machine diagram into a premium, professional PDF report named `Email_Bot_Architecture.pdf`.
 
 To generate this PDF, execute the following command in the workspace directory:
 
 ```bash
-python generate_flow_pdf.py
+python scripts/generate_flow_pdf.py
 ```
 
 ### Dependencies

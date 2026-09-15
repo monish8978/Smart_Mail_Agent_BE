@@ -18,13 +18,21 @@ def get_order_by_id(client_id: str, order_id: str):
     try:
         logger.info(f"🔍 [Client {client_id}] Fetching order details for order_id: {order_id}")
         
-        # Call the existing get_order_status function
+        # 1. First attempt dynamic connector lookup
+        from app.connector_config import run_order_status_lookup
+        dyn_res = run_order_status_lookup(client_id=client_id, order_id=order_id)
+        if dyn_res.get("success"):
+            order_data = dyn_res.get("data")
+            logger.info(f"✅ Order found via dynamic connector: {order_id}")
+            return order_data
+
+        # 2. Fall back to legacy get_order_status (payload_get_ticket)
         response = get_order_status(client_id, order_id)
         
         # Check if API call was successful
         if response.get("success"):
             order_data = response.get("data")
-            logger.info(f"✅ Order found: {order_id}")
+            logger.info(f"✅ Order found via legacy connector: {order_id}")
             return order_data
         else:
             error = response.get("error", "Unknown error")

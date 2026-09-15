@@ -33,8 +33,14 @@ celery.conf.update(
     # (there's nothing to load here anymore); it's to keep per-process
     # memory low on a 6GB host at current traffic levels. Revisit if
     # traffic grows — see docker-compose.yml `worker` mem_limit for the
-    # matching ceiling.
-    worker_concurrency=1,
+    # Concurrency scaled to 2: doubles throughput while keeping host footprint ~450MB
+    worker_concurrency=2,
+    beat_schedule={
+        "sweep-stale-outbox-every-2-min": {
+            "task": "worker.tasks.sweep_stale_outbox_task",
+            "schedule": 120.0,
+        },
+    },
 )
 
 

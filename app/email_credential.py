@@ -1,104 +1,100 @@
 # following by hyper_is_op
 
 import uuid
-from app.db import get_db
+from app.db import get_db, get_db_ctx
 import logging
 from typing import Any
 import json
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+
+def _decrypt_imap_password(stored: str, client_id: str | None = None) -> str:
+    """Decrypt IMAP password, handling both encrypted and legacy plaintext."""
+    if not stored:
+        return ""
+    if stored.startswith("gAAAAA"):  # Fernet token prefix
+        from app.secrets_crypto import decrypt_secret
+        try:
+            return decrypt_secret(stored, client_id=client_id)
+        except Exception as e:
+            logger.error(f"Failed to decrypt IMAP password: {e}")
+            return stored
+    return stored  # Legacy plaintext fallback during migration
 
 
 def save_email_account(client_id: str, email: str, password: str, score_threshold: int = 80, response_tone: str = "Formal", agent_type: str = "customer_support"):
     logger.info(f"💾 Saving email account for client_id={client_id} email={email} score_threshold={score_threshold} response_tone={response_tone} agent_type={agent_type}")
-    db = get_db()
-    cursor = db.cursor()
-    try:
-        logger.info(f"📝 Checking duplicate records for client_id={client_id}")
-        cursor.execute("SELECT id FROM email_accounts WHERE client_id = %s LIMIT 1", (client_id,))
-        row = cursor.fetchone()
-        
-        if row:
-            logger.info(f"📝 Updating existing credentials for client_id={client_id}")
-            cursor.execute("""
-                UPDATE email_accounts 
-                SET email = %s, password = %s, score_threshold = %s, response_tone = %s, agent_type = %s
-                WHERE client_id = %s
-            """, (email, password, score_threshold, response_tone, agent_type, client_id))
-        else:
-            logger.info(f"📝 Inserting new record for client_id={client_id}")
-            cursor.execute("""
-                INSERT INTO email_accounts (client_id, email, password, score_threshold, response_tone, agent_type)
-                VALUES (%s, %s, %s, %s, %s, %s)
-            """, (client_id, email, password, score_threshold, response_tone, agent_type))
+    from app.secrets_crypto import encrypt_secret
+    encrypted_password = encrypt_secret(password, client_id=client_id) if password and not password.startswith("gAAAAA") else (password or "")
+    with get_db_ctx() as db:
+        with db.cursor() as cursor:
+            logger.info(f"📝 Checking duplicate records for client_id={client_id}")
+            cursor.execute("SELECT id FROM email_accounts WHERE client_id = %s LIMIT 1", (client_id,))
+            row = cursor.fetchone()
             
-        db.commit()
-        logger.info(f"✅ Email account saved successfully for client_id={client_id}")
-    except Exception as e:
-        logger.error(f"❌ Failed to save email account for client_id={client_id}: {str(e)}", exc_info=True)
-        raise e
-    finally:
-        cursor.close()
-        db.close()
-        logger.info("🔒 DB connection closed")
+            if row:
+                logger.info(f"📝 Updating existing credentials for client_id={client_id}")
+                cursor.execute("""
+                    UPDATE email_accounts 
+                    SET email = %s, password = %s, score_threshold = %s, response_tone = %s, agent_type = %s
+                    WHERE client_id = %s
+                """, (email, encrypted_password, score_threshold, response_tone, agent_type, client_id))
+            else:
+                logger.info(f"📝 Inserting new record for client_id={client_id}")
+                cursor.execute("""
+                    INSERT INTO email_accounts (client_id, email, password, score_threshold, response_tone, agent_type)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (client_id, email, encrypted_password, score_threshold, response_tone, agent_type))
+                
+            db.commit()
+            logger.info(f"✅ Email account saved successfully for client_id={client_id}")
+
 
 def get_connector_cap(client_id: str) -> int:
-    db = get_db()
-    cursor = db.cursor()
-    try:
-        cursor.execute("SELECT connector_cap FROM email_accounts WHERE client_id = %s LIMIT 1", (client_id,))
-        row = cursor.fetchone()
-        return row[0] if row and row[0] is not None else 5
-    finally:
-        cursor.close()
-        db.close()
+    with get_db_ctx() as db:
+        with db.cursor() as cursor:
+            cursor.execute("SELECT connector_cap FROM email_accounts WHERE client_id = %s LIMIT 1", (client_id,))
+            row = cursor.fetchone()
+            return row[0] if row and row[0] is not None else 5
+
 
 def get_email_account(client_id: str) -> dict:
     logger.info(f"🔎 Fetching email account for client_id={client_id}")
-    db = get_db()
-    cursor = db.cursor()
-    try:
-        if client_id == "ALL":
+    with get_db_ctx() as db:
+        with db.cursor() as cursor:
+            if client_id == "ALL":
+                cursor.execute("""
+                    SELECT score_threshold FROM email_accounts ORDER BY id ASC LIMIT 1
+                """)
+                row = cursor.fetchone()
+                thresh = row[0] if row and row[0] is not None else 80
+                return {
+                    "client_id": "ALL",
+                    "score_threshold": thresh,
+                    "response_tone": "Formal",
+                    "agent_type": "customer_support_agent"
+                }
+
             cursor.execute("""
-                SELECT score_threshold FROM email_accounts ORDER BY id ASC LIMIT 1
-            """)
+                SELECT client_id, email, password, score_threshold, response_tone,
+                       agent_type, department_name, company_name
+                FROM email_accounts WHERE client_id = %s LIMIT 1
+            """, (client_id,))
             row = cursor.fetchone()
-            thresh = row[0] if row and row[0] is not None else 80
+            if not row:
+                logger.warning(f"⚠️ No account found for client_id={client_id}")
+                return {}
             return {
-                "client_id": "ALL",
-                "score_threshold": thresh,
-                "response_tone": "Formal",
-                "agent_type": "customer_support_agent"
+                "client_id":       row[0],
+                "email":           row[1],
+                "password":        _decrypt_imap_password(row[2], client_id=row[0]),
+                "score_threshold": row[3] if row[3] is not None else 80,
+                "response_tone":   row[4] if row[4] is not None else "Formal",
+                "agent_type":      row[5] if row[5] is not None else "customer_support_agent",
+                "department_name": row[6] if row[6] is not None else None,
+                "company_name":    row[7] if row[7] is not None else None,
             }
-
-        cursor.execute("""
-            SELECT client_id, email, password, score_threshold, response_tone,
-                   agent_type, department_name, company_name
-            FROM email_accounts WHERE client_id = %s LIMIT 1
-        """, (client_id,))
-        row = cursor.fetchone()
-        if not row:
-            logger.warning(f"⚠️ No account found for client_id={client_id}")
-            return {}
-        return {
-            "client_id":       row[0],
-            "email":           row[1],
-            "password":        row[2],
-            "score_threshold": row[3] if row[3] is not None else 80,
-            "response_tone":   row[4] if row[4] is not None else "Formal",
-            "agent_type":      row[5] if row[5] is not None else "customer_support_agent",
-            "department_name": row[6] if row[6] is not None else None,
-            "company_name":    row[7] if row[7] is not None else None,
-        }
-    except Exception as e:
-        logger.error(f"❌ Failed to fetch email account for client_id={client_id}: {str(e)}", exc_info=True)
-        raise e
-    finally:
-        cursor.close()
-        db.close()
-
-
 
 
 def ensure_accounts_table_startup(cursor):
@@ -173,6 +169,26 @@ def ensure_accounts_table_startup(cursor):
         if col_name not in existing_cols:
             cursor.execute(f"ALTER TABLE email_accounts ADD COLUMN {col_name} {col_def}")
 
+    # --- Encrypt any plaintext IMAP passwords ---
+    try:
+        from app.secrets_crypto import encrypt_secret
+        cursor.execute("SELECT id, password FROM email_accounts WHERE password IS NOT NULL AND password != ''")
+        rows = cursor.fetchall()
+        migrated = 0
+        for row_id, raw_pw in rows:
+            # Skip if already Fernet-encrypted (base64 token starting with 'gAAAAA')
+            if raw_pw and raw_pw.startswith("gAAAAA"):
+                continue
+            encrypted = encrypt_secret(raw_pw)
+            cursor.execute("UPDATE email_accounts SET password = %s WHERE id = %s", (encrypted, row_id))
+            migrated += 1
+        if migrated:
+            logger.info(f"🔐 Migrated {migrated} plaintext IMAP passwords to encrypted storage")
+    except Exception as e:
+        logger.error(f"❌ IMAP password encryption migration failed: {e}")
+        raise  # Fail startup loudly — don't silently skip
+
+
 def ensure_ticket_record_table(cursor):
     """
     Creates ticket_record table if it does not exist.
@@ -185,10 +201,7 @@ def ensure_ticket_record_table(cursor):
             subject    TEXT         NOT NULL,
             body       TEXT         NOT NULL,
             status     VARCHAR(50)  NOT NULL,
-            sentiment  VARCHAR(50)  DEFAULT 'Neutral',
-            priority   VARCHAR(50)  DEFAULT 'Medium',
-            created_at TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_ticket_record_client_created (client_id, created_at)
+            created_at TIMESTAMP    DEFAULT CURRENT_TIMESTAMP
         )
     """)
 
@@ -198,9 +211,10 @@ def ensure_ticket_record_table(cursor):
     if "user_id" in existing_cols and "client_id" not in existing_cols:
         cursor.execute("ALTER TABLE ticket_record CHANGE user_id client_id VARCHAR(50) NOT NULL")
     if "sentiment" not in existing_cols:
-        cursor.execute("ALTER TABLE ticket_record ADD COLUMN sentiment VARCHAR(50) DEFAULT 'Neutral'")
+        cursor.execute("ALTER TABLE ticket_record ADD COLUMN sentiment VARCHAR(50) DEFAULT NULL")
     if "priority" not in existing_cols:
-        cursor.execute("ALTER TABLE ticket_record ADD COLUMN priority VARCHAR(50) DEFAULT 'Medium'")
+        cursor.execute("ALTER TABLE ticket_record ADD COLUMN priority VARCHAR(50) DEFAULT NULL")
+
 
 _ensure_table = ensure_ticket_record_table
 
@@ -214,40 +228,32 @@ def create_email_record_db(data: dict) -> dict:
         {"success": True,  "ticket_id": "<uuid>"}
         {"success": False, "error": <str>}
     """
-    db = None
     try:
-        db = get_db()
-        cursor = db.cursor()
-        _ensure_table(cursor)
-        ticket_id = str(uuid.uuid4())  # random, unique e.g. "3f2a1b4c-..."
-        cursor.execute("""
-            INSERT INTO ticket_record (ticket_id, client_id, mail_id, subject, body, status)
-            VALUES (%s, %s, %s, %s, %s, %s)
-        """, (
-            ticket_id,
-            data["client_id"],
-            data["mail_id"],
-            data["subject"],
-            data["body"],
-            data["status"],
-        ))
-        db.commit()
-        logger.info(f"✅ Ticket created — ticket_id={ticket_id}")
-        return {"success": True, "ticket_id": ticket_id, "client_id":data["client_id"],"mail_id":data["mail_id"]}
+        with get_db_ctx() as db:
+            with db.cursor() as cursor:
+                _ensure_table(cursor)
+                ticket_id = str(uuid.uuid4())  # random, unique e.g. "3f2a1b4c-..."
+                cursor.execute("""
+                    INSERT INTO ticket_record (ticket_id, client_id, mail_id, subject, body, status)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (
+                    ticket_id,
+                    data["client_id"],
+                    data["mail_id"],
+                    data["subject"],
+                    data["body"],
+                    data["status"],
+                ))
+            db.commit()
+            logger.info(f"✅ Ticket created — ticket_id={ticket_id}")
+            return {"success": True, "ticket_id": ticket_id, "client_id": data["client_id"], "mail_id": data["mail_id"]}
     except Exception as e:
         logger.error(f"❌ DB insert failed: {e}", exc_info=True)
-        if db:
-            db.rollback()
         return {"success": False, "error": str(e)}
-    finally:
-        if db:
-            db.close()
-
 
 
 def ensure_create_payload_table():
-    db = get_db()
-    try:
+    with get_db_ctx() as db:
         with db.cursor() as cursor:
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS create_payload_table (
@@ -260,20 +266,15 @@ def ensure_create_payload_table():
             """)
             try:
                 cursor.execute("ALTER TABLE create_payload_table ADD UNIQUE INDEX (client_id)")
-            except:
+            except Exception:
                 pass
         db.commit()
         logger.info("✅ create_payload_table ensured")
-    except Exception as e:
-        logger.error(f"❌ Failed to ensure create_payload_table: {e}", exc_info=True)
-        raise
-    finally:
-        db.close()
+
 
 def insert_create_payload_ticket(client_id: str, url: str, paylod: dict[str, Any]) -> str:
-    db = get_db()
-    try:
-        ensure_create_payload_table()
+    ensure_create_payload_table()
+    with get_db_ctx() as db:
         with db.cursor() as cursor:
             cursor.execute("SELECT id FROM create_payload_table WHERE client_id = %s LIMIT 1", (client_id,))
             row = cursor.fetchone()
@@ -288,20 +289,13 @@ def insert_create_payload_ticket(client_id: str, url: str, paylod: dict[str, Any
                     INSERT INTO create_payload_table (client_id, url, paylod)
                     VALUES (%s, %s, %s)
                 """, (client_id, url, json.dumps(paylod)))
-            db.commit()
-            logger.info(f"✅ create_payload_table inserted — client_id={client_id}")
-            return client_id
-    except Exception as e:
-        db.rollback()
-        logger.error(f"❌ Failed to insert payload: {e}", exc_info=True)
-        raise
-    finally:
-        db.close()
-        
-        
+        db.commit()
+        logger.info(f"✅ create_payload_table inserted — client_id={client_id}")
+        return client_id
+
+
 def get_create_payload_table(client_id: str) -> dict:
-    db = get_db()
-    try:
+    with get_db_ctx() as db:
         with db.cursor() as cursor:
             cursor.execute("""
                 SELECT url, paylod 
@@ -312,18 +306,13 @@ def get_create_payload_table(client_id: str) -> dict:
             logger.warning(f"⚠️ No create_payload_table found for client_id={client_id}")
             return {}
         return {
-            "url":      row[0],
-            "paylod":     json.loads(row[1])
+            "url": row[0],
+            "paylod": json.loads(row[1])
         }
-    except Exception as e:
-        logger.error(f"❌ Failed to fetch payload: {e}", exc_info=True)
-        raise
-    finally:
-        db.close()
-        
+
+
 def ensure_payload_get_ticket_table():
-    db = get_db()
-    try:
+    with get_db_ctx() as db:
         with db.cursor() as cursor:
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS payload_get_table (
@@ -336,21 +325,15 @@ def ensure_payload_get_ticket_table():
             """)
             try:
                 cursor.execute("ALTER TABLE payload_get_table ADD UNIQUE INDEX (client_id)")
-            except:
+            except Exception:
                 pass
         db.commit()
         logger.info("✅ payload_get_table ensured")
-    except Exception as e:
-        logger.error(f"❌ Failed to ensure payload_get_table: {e}", exc_info=True)
-        raise
-    finally:
-        db.close()
 
 
 def insert_payload_get_ticket(client_id: str, url: str, paylod: dict[str, Any]) -> str:
-    db = get_db()
-    try:
-        ensure_payload_get_ticket_table()
+    ensure_payload_get_ticket_table()
+    with get_db_ctx() as db:
         with db.cursor() as cursor:
             cursor.execute("SELECT id FROM payload_get_table WHERE client_id = %s LIMIT 1", (client_id,))
             row = cursor.fetchone()
@@ -365,20 +348,13 @@ def insert_payload_get_ticket(client_id: str, url: str, paylod: dict[str, Any]) 
                     INSERT INTO payload_get_table (client_id, url, paylod)
                     VALUES (%s, %s, %s)
                 """, (client_id, url, json.dumps(paylod)))
-            db.commit()
-            logger.info(f"✅ payload_get_table inserted — client_id={client_id}")
-            return client_id
-    except Exception as e:
-        db.rollback()
-        logger.error(f"❌ Failed to insert payload: {e}", exc_info=True)
-        raise
-    finally:
-        db.close()
+        db.commit()
+        logger.info(f"✅ payload_get_table inserted — client_id={client_id}")
+        return client_id
 
 
 def get_payload_get_ticket_table(client_id: str) -> dict:
-    db = get_db()
-    try:
+    with get_db_ctx() as db:
         with db.cursor() as cursor:
             cursor.execute("""
                 SELECT url, paylod 
@@ -389,14 +365,9 @@ def get_payload_get_ticket_table(client_id: str) -> dict:
             logger.warning(f"⚠️ No payload_get_table found for client_id={client_id}")
             return {}
         return {
-            "url":      row[0],
-            "paylod":     json.loads(row[1])
+            "url": row[0],
+            "paylod": json.loads(row[1])
         }
-    except Exception as e:
-        logger.error(f"❌ Failed to fetch payload: {e}", exc_info=True)
-        raise
-    finally:
-        db.close()
 
 
 def get_budget_status(client_id, cursor):
@@ -430,8 +401,7 @@ def get_budget_status(client_id, cursor):
 
 
 def get_all_create_payloads() -> list[dict]:
-    db = get_db()
-    try:
+    with get_db_ctx() as db:
         with db.cursor() as cursor:
             cursor.execute("""
                 SELECT p.client_id, p.url, p.paylod, a.email 
@@ -453,16 +423,10 @@ def get_all_create_payloads() -> list[dict]:
                 "email": r[3] or r[0]
             })
         return result
-    except Exception as e:
-        logger.error(f"❌ Failed to fetch all create payloads: {e}", exc_info=True)
-        return []
-    finally:
-        db.close()
 
 
 def get_all_get_payloads() -> list[dict]:
-    db = get_db()
-    try:
+    with get_db_ctx() as db:
         with db.cursor() as cursor:
             cursor.execute("""
                 SELECT p.client_id, p.url, p.paylod, a.email 
@@ -484,8 +448,3 @@ def get_all_get_payloads() -> list[dict]:
                 "email": r[3] or r[0]
             })
         return result
-    except Exception as e:
-        logger.error(f"❌ Failed to fetch all get payloads: {e}", exc_info=True)
-        return []
-    finally:
-        db.close()
