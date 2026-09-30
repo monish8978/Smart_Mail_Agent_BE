@@ -83,6 +83,7 @@ class ClientProfileRequest(BaseModel):
     agent_type: Optional[str] = None
     department_name: Optional[str] = None
     company_name: Optional[str] = None
+    cost_multiplier: Optional[float] = None
 
 
 @router.post("/admin/client-profile")
@@ -95,11 +96,18 @@ def set_client_profile(data: ClientProfileRequest, user: dict = Depends(require_
                 WHERE client_id=%s
             """, (data.name or "", data.phone_number or "", data.login_email or "", data.client_id))
             
-            cursor.execute("""
-                UPDATE email_accounts 
-                SET agent_type=%s, department_name=%s, company_name=%s, email=%s, password=%s
-                WHERE client_id=%s
-            """, (data.agent_type or "", data.department_name or "", data.company_name or "", data.imap_email or "", data.imap_password or "", data.client_id))
+            if data.cost_multiplier is not None:
+                cursor.execute("""
+                    UPDATE email_accounts 
+                    SET agent_type=%s, department_name=%s, company_name=%s, email=%s, password=%s, cost_multiplier=%s
+                    WHERE client_id=%s
+                """, (data.agent_type or "", data.department_name or "", data.company_name or "", data.imap_email or "", data.imap_password or "", data.cost_multiplier, data.client_id))
+            else:
+                cursor.execute("""
+                    UPDATE email_accounts 
+                    SET agent_type=%s, department_name=%s, company_name=%s, email=%s, password=%s
+                    WHERE client_id=%s
+                """, (data.agent_type or "", data.department_name or "", data.company_name or "", data.imap_email or "", data.imap_password or "", data.client_id))
             
             db.commit()
     return {"success": True}

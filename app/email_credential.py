@@ -381,8 +381,10 @@ def get_budget_status(client_id, cursor):
     budget = float(row[0]) if row and row[0] is not None else None
 
     cursor.execute("""
-        SELECT COALESCE(SUM(billed_cost), 0) FROM llm_logs
-        WHERE client_id=%s AND MONTH(created_at)=MONTH(CURDATE()) AND YEAR(created_at)=YEAR(CURDATE())
+        SELECT COALESCE(SUM(l.cost * COALESCE(ea.cost_multiplier, 1.0)), 0) 
+        FROM llm_logs l
+        LEFT JOIN email_accounts ea ON l.client_id = ea.client_id
+        WHERE l.client_id=%s AND MONTH(l.created_at)=MONTH(CURDATE()) AND YEAR(l.created_at)=YEAR(CURDATE())
     """, (client_id,))
     spent = float(cursor.fetchone()[0] or 0)
 

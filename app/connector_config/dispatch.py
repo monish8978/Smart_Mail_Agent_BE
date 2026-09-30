@@ -142,12 +142,17 @@ def run_payment_status_lookup(
 
     result = execute_connector(cfg_payment, context_base, body=body, history=history or [], old_summary=old_summary)
     if not result.get("success"):
-        return {"success": False, "error": result.get("error", "Unknown payment connector failure")}
+        return {
+            "success": False,
+            "not_found": bool(result.get("not_found")),
+            "status_code": result.get("status_code"),
+            "error": result.get("error", "Unknown payment connector failure")
+        }
 
     data = result.get("data", {})
     has_record = any(data.get(k) for k in ("payment_status", "status", "transaction_id", "amount", "id"))
     if not has_record:
-        return {"success": False, "error": f"No matching payment record found for reference '{ref}'"}
+        return {"success": False, "not_found": True, "error": f"No matching payment record found for reference '{ref}'"}
 
     return {"success": True, "data": data}
 
@@ -189,12 +194,17 @@ def run_ticket_status_lookup(
 
     result = execute_connector(cfg_ticket, context_base, body=body, history=history or [], old_summary=old_summary)
     if not result.get("success"):
-        return {"success": False, "error": result.get("error", "Unknown executor failure")}
+        return {
+            "success": False,
+            "not_found": bool(result.get("not_found")),
+            "status_code": result.get("status_code"),
+            "error": result.get("error", "Unknown executor failure")
+        }
 
     data = result.get("data", {})
     has_record = any(data.get(k) for k in ("docket_no", "ticket_status", "ticket_id", "status"))
     if not has_record:
-        return {"success": False, "error": f"No matching ticket record found for '{ticket_id}'"}
+        return {"success": False, "not_found": True, "error": f"No matching ticket record found for '{ticket_id}'"}
 
     return {"success": True, "data": data}
 
@@ -237,7 +247,12 @@ def run_order_status_lookup(
 
     result = execute_connector(selected_config, context_base, body=body, history=history or [], old_summary=old_summary)
     if not result.get("success"):
-        return {"success": False, "error": result.get("error", "Unknown executor failure")}
+        return {
+            "success": False,
+            "not_found": bool(result.get("not_found")),
+            "status_code": result.get("status_code"),
+            "error": result.get("error", "Unknown executor failure")
+        }
 
     data = result.get("data", {})
     has_record = any(data.get(k) for k in ("docket_no", "ticket_status", "ticket_id", "status", "order_id"))
@@ -254,6 +269,10 @@ def run_order_status_lookup(
                 return {"success": True, "data": data_hash}
 
     if not has_record:
-        return {"success": False, "error": f"No matching record found for '{clean_order_id}' in {selected_config.get('trigger_type')} system response"}
+        return {
+            "success": False,
+            "not_found": True,
+            "error": f"No matching record found for '{clean_order_id}' in {selected_config.get('trigger_type')} system response"
+        }
 
     return {"success": True, "data": data}

@@ -116,15 +116,16 @@ GUIDELINES & HARD CONSTRAINTS:
 - If the customer asks about or provides an order number/ID (e.g., #1001, ORD10294, 'where is my order'), you MUST call 'lookup_order_status'.
 - If the customer asks about payment, billing, charge, or transaction status (e.g., transaction ID, invoice ID, payment reference), you MUST call 'lookup_payment_status'.
 - If the customer asks about or provides an existing support ticket reference (e.g., T-260505-00117, ticket #4921), you MUST call 'lookup_ticket_status'.
+- If any lookup tool ('lookup_ticket_status', 'lookup_order_status', 'lookup_payment_status', 'lookup_ticket_or_order_status') returns that the record was not found, inform the customer politely that the reference ID could not be found in our records, and ask them to verify or reply with the correct reference number. Do NOT call 'escalate_and_create_ticket' simply because a record was not found.
 - If the customer reports a technical issue or problem:
   1. Search the knowledge base using 'search_knowledge_base' for diagnostic guides and solutions.
   2. If steps exist, guide the customer through ONE clear troubleshooting action and ask them to test it and reply back with what happens.
   3. If previous steps failed (see conversation history), offer the next diagnostic step.
   4. Only call 'escalate_and_create_ticket' if:
      - All troubleshooting steps in the knowledge base have been exhausted, OR
-     - 3 troubleshooting turns have already occurred and the issue remains unresolved, OR
-     - The issue is a confirmed hardware/server failure or billing bug that self-troubleshooting cannot fix, OR
-     - The customer explicitly asks for human support / ticket creation.
+     - 3 troubleshooting turns have already occurred and the issue remains unresolved.
+     # - The issue is a confirmed hardware/server failure or billing bug that self-troubleshooting cannot fix, OR
+     # - The customer explicitly asks for human support / ticket creation.
 - If the customer states the issue is resolved or that a step worked, confirm resolution politely and DO NOT create a ticket.
 - NEVER invent facts, order statuses, turnaround times, or tracking links that were not returned by tools.
 - Address the customer politely: "Dear {customer_name},".
@@ -310,13 +311,15 @@ def run_support_agent(ctx: PipelineContext, cursor: Optional[Any] = None) -> Pip
 
     # 5. Post-Processing: Disclaimers and Evaluation
     final_draft = append_client_disclaimers(ctx.client_id, final_draft)
+    is_not_found = bool(isinstance(ctx.context_data, dict) and ctx.context_data.get("status") == "not_found")
     score, decision = evaluate_draft_and_decide(
         client_id=ctx.client_id,
         reply=final_draft,
         query=user_query,
         context_succeeded=bool(ctx.context_text or ctx.context_data or not tool_calls or ctx.is_resolved),
         is_resolved=ctx.is_resolved,
-        troubleshooting_step=ctx.troubleshooting_step
+        troubleshooting_step=ctx.troubleshooting_step,
+        is_not_found=is_not_found
     )
 
     ctx.draft_reply = final_draft

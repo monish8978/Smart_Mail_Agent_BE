@@ -412,13 +412,20 @@ def execute_connector(
         return {"success": False, "error": str(e)}
     except requests.exceptions.RequestException as e:
         resp_text = ""
+        status_code = None
         if hasattr(e, "response") and e.response is not None:
+            status_code = getattr(e.response, "status_code", None)
             try:
                 resp_text = f" — Response Body: {e.response.text}"
             except Exception:
                 pass
         logger.error(f"❌ Executor HTTP call failed: {e}{resp_text}")
-        return {"success": False, "error": f"{e}{resp_text}"}
+        return {
+            "success": False,
+            "status_code": status_code,
+            "not_found": (status_code == 404),
+            "error": f"{e}{resp_text}"
+        }
     except Exception as e:
         logger.error(f"❌ Executor unexpected failure: {e}", exc_info=True)
         return {"success": False, "error": str(e)}

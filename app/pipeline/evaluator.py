@@ -33,7 +33,8 @@ def evaluate_draft_and_decide(
     query: str,
     context_succeeded: bool = True,
     is_resolved: bool = False,
-    troubleshooting_step: int = 0
+    troubleshooting_step: int = 0,
+    is_not_found: bool = False
 ) -> Tuple[int, str]:
     """
     Evaluates reply quality against customer query and determines action.
@@ -67,6 +68,14 @@ def evaluate_draft_and_decide(
     if troubleshooting_step in (1, 2, 3) and context_succeeded:
         if score >= 50:
             logger.info(f"🔧 [Client {client_id}] Active troubleshooting step {troubleshooting_step} (score: {score}) -> delivering diagnostic to customer")
+            return score, "auto_send"
+
+    # 5b. When a reference (ticket/order/payment) is not found in the external system and the agent
+    # drafts a clarification asking the customer to verify, deliver it to the customer if score >= 50
+    # instead of tripping the strict ticket escalation threshold.
+    if is_not_found and context_succeeded:
+        if score >= 50:
+            logger.info(f"🔍 [Client {client_id}] Reference not found in records (score: {score}) -> delivering clarification request to customer")
             return score, "auto_send"
 
     # 6. Turn 4+: Troubleshooting attempts exhausted without resolution -> force ticket escalation

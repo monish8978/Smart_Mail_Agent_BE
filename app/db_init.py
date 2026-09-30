@@ -404,6 +404,18 @@ def ensure_llm_logs_table():
                     cursor.execute("ALTER TABLE llm_logs ADD COLUMN billed_cost DECIMAL(10, 6) DEFAULT NULL")
                 except Exception:
                     pass
+                try:
+                    cursor.execute("ALTER TABLE llm_logs ADD COLUMN email_log_id INT DEFAULT NULL")
+                except Exception:
+                    pass
+                try:
+                    cursor.execute("ALTER TABLE llm_logs ADD COLUMN thread_id VARCHAR(100) DEFAULT NULL")
+                except Exception:
+                    pass
+                try:
+                    cursor.execute("ALTER TABLE llm_logs ADD INDEX idx_llm_client_created (client_id, created_at)")
+                except Exception:
+                    pass
                 db.commit()
         logger.info("✅ llm_logs table ensured at startup")
     except Exception as e:

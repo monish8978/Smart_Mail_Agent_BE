@@ -419,6 +419,9 @@ def telemetry_create(*args, caller: str | None = None, **kwargs):
         except Exception:
             pass
 
+    email_log_id = kwargs.pop("email_log_id", None)
+    thread_id = kwargs.pop("thread_id", None)
+
     start_time = time.time()
     client_id = current_client_id.get()
 
@@ -505,15 +508,15 @@ def telemetry_create(*args, caller: str | None = None, **kwargs):
                     if raw_c:
                         choice.message.content = strip_reasoning_and_think_tags(raw_c)
 
-        log_llm_metrics_db(client_id, provider, actual_model, prompt_tokens, completion_tokens, latency_ms, caller)
+        log_llm_metrics_db(client_id, provider, actual_model, prompt_tokens, completion_tokens, latency_ms, caller, email_log_id=email_log_id, thread_id=thread_id)
     except Exception as telemetry_err:
         logger.warning(f"Telemetry tracking error: {telemetry_err}")
 
     return res
 
 class _TelemetryCompletions:
-    def create(self, *args, caller: str | None = None, **kwargs):
-        return telemetry_create(*args, caller=caller, **kwargs)
+    def create(self, *args, caller: str | None = None, email_log_id: int | None = None, thread_id: str | None = None, **kwargs):
+        return telemetry_create(*args, caller=caller, email_log_id=email_log_id, thread_id=thread_id, **kwargs)
 
 
 class _TelemetryChat:

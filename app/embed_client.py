@@ -21,10 +21,55 @@ import requests
 logger = logging.getLogger(__name__)
 
 EMBED_SERVICE_URL = os.getenv("EMBED_SERVICE_URL", "http://mail_ai_embed_service:8500")
-EMBED_TIMEOUT_SECONDS = int(os.getenv("EMBED_TIMEOUT_SECONDS", "10"))
+EMBED_TIMEOUT_SECONDS = int(os.getenv("EMBED_TIMEOUT_SECONDS", "25"))
 
 
 BATCH_SIZE = 32
+
+# In-memory LRU cache fallback (up to 1000 items)
+_MEM_QUERY_CACHE: dict[str, list[float]] = {}
+_MAX_MEM_CACHE_SIZE = 1000
+
+
+def _get_query_cache(key: str) -> list[float] | None:
+    # 1. Try Redis first
+    try:
+        from app.redis_pool import get_redis_main
+        import json
+        r = get_redis_main()
+        if r:
+            cached_val = r.get(f"embed_cache:query:{key}")
+            if cached_val:
+                return json.loads(cached_val)
+    except Exception:
+        pass
+
+    # 2. Try in-memory cache
+    return _MEM_QUERY_CACHE.get(key)
+
+
+def _set_query_cache(key: str, vector: list[float]):
+    if not vector:
+        return
+    # 1. Store in Redis with 24-hour expiration
+    try:
+        from app.redis_pool import get_redis_main
+        import json
+        r = get_redis_main()
+        if r:
+            r.setex(f"embed_cache:query:{key}", 86400, json.dumps(vector))
+    except Exception:
+        pass
+
+    # 2. Store in in-memory LRU
+    if len(_MEM_QUERY_CACHE) >= _MAX_MEM_CACHE_SIZE:
+        # Evict oldest entry
+        try:
+            oldest_key = next(iter(_MEM_QUERY_CACHE))
+            _MEM_QUERY_CACHE.pop(oldest_key, None)
+        except Exception:
+            _MEM_QUERY_CACHE.clear()
+    _MEM_QUERY_CACHE[key] = vector
 
 
 def _post_embed(texts: list[str]) -> list[list[float]] | None:
@@ -68,11 +113,26 @@ def embed_passages(texts: list[str]) -> list[list[float]] | None:
 
 
 def embed_query(text: str) -> list[float] | None:
-    """Embed a single search QUERY. Applies the 'query: ' prefix."""
-    result = _post_embed([f"query: {text}"])
+    """
+    Embed a single search QUERY with the 'query: ' prefix.
+    Checks Redis and in-memory LRU cache before hitting the microservice.
+    """
+    import hashlib
+    clean_text = text.strip()
+    cache_key = hashlib.sha256(clean_text.encode("utf-8")).hexdigest()
+
+    cached = _get_query_cache(cache_key)
+    if cached is not None:
+        logger.debug(f"⚡ [Embed Cache Hit] Retrieved query vector for '{clean_text[:40]}...'")
+        return cached
+
+    result = _post_embed([f"query: {clean_text}"])
     if result is None:
         return None
-    return result[0] if result else None
+    vector = result[0] if result else None
+    if vector:
+        _set_query_cache(cache_key, vector)
+    return vector
 
 
 def embed_service_healthy() -> bool:
@@ -81,3 +141,4 @@ def embed_service_healthy() -> bool:
         return resp.status_code == 200
     except Exception:
         return False
+

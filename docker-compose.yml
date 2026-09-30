@@ -27,6 +27,10 @@ services:
     restart: unless-stopped
     ports:
       - "8500:8500"
+    environment:
+      - OMP_NUM_THREADS=2
+      - MKL_NUM_THREADS=2
+      - TORCH_NUM_THREADS=2
     mem_limit: 1.5g
     # Deliberately 1 replica, no load balancer — see migration spec.
     # An outage here degrades RAG to the JSON fallback / ticket-creation

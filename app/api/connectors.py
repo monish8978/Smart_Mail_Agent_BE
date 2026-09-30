@@ -140,6 +140,8 @@ class OAuthTestRequest(BaseModel):
     client_secret: str
     refresh_token: Optional[str] = None
     grant_type: Optional[str] = None
+    code: Optional[str] = None
+    redirect_uri: Optional[str] = None
     scope: Optional[str] = None
     token_auth_method: str = "client_secret_post"
     header_prefix: Optional[str] = "Bearer"
@@ -713,65 +715,121 @@ def test_oauth_endpoint(data: OAuthTestRequest, user: dict = Depends(get_current
     import requests
     start_time = time.time()
 
+    candidate_code = data.code or data.refresh_token
     effective_grant = data.grant_type or ("refresh_token" if data.refresh_token else "client_credentials")
-    post_data = {"grant_type": effective_grant}
-    if effective_grant == "refresh_token":
-        if not data.refresh_token:
-            return {
-                "success": False,
-                "error": "grant_type=refresh_token requires refresh_token to be provided",
-                "duration_ms": 0
-            }
-        post_data["refresh_token"] = data.refresh_token
 
-    if data.scope:
-        post_data["scope"] = data.scope
+    def build_post_data(grant: str, token_or_code: Optional[str] = None):
+        p = {"grant_type": grant}
+        if grant == "refresh_token":
+            p["refresh_token"] = token_or_code
+        elif grant == "authorization_code":
+            p["code"] = token_or_code
+            if data.redirect_uri:
+                p["redirect_uri"] = data.redirect_uri
+        if data.scope:
+            p["scope"] = data.scope
+        if data.token_auth_method != "client_secret_basic":
+            p["client_id"] = data.client_id
+            p["client_secret"] = data.client_secret
+        return p
 
-    auth = None
-    if data.token_auth_method == "client_secret_basic":
-        auth = (data.client_id, data.client_secret)
-    else:
-        post_data["client_id"] = data.client_id
-        post_data["client_secret"] = data.client_secret
-
+    auth = (data.client_id, data.client_secret) if data.token_auth_method == "client_secret_basic" else None
     headers = {"Accept": "application/json"}
+
+    if effective_grant in ("refresh_token", "authorization_code") and not candidate_code:
+        return {
+            "success": False,
+            "error": f"grant_type={effective_grant} requires a token or authorization code to be provided",
+            "duration_ms": 0,
+        }
+
+    post_data = build_post_data(effective_grant, candidate_code)
 
     try:
         res = requests.post(data.token_url, data=post_data, headers=headers, auth=auth, timeout=10)
         duration_ms = round((time.time() - start_time) * 1000)
+        res_json = {}
+        try:
+            res_json = res.json()
+        except Exception:
+            pass
+
+        # Auto-fallback: If user pasted a Zoho Grant Token (authorization code) into the refresh_token field,
+        # Zoho returns {'error': 'invalid_code'}. Automatically retry as authorization_code!
+        if effective_grant == "refresh_token" and candidate_code and (
+            res.status_code != 200 or not res_json.get("access_token")
+        ):
+            if res_json.get("error") == "invalid_code" or "invalid_code" in str(res.text):
+                logger.info("🔄 refresh_token rejected with invalid_code; attempting auto-exchange as authorization_code")
+                fallback_data = build_post_data("authorization_code", candidate_code)
+                res_fallback = requests.post(data.token_url, data=fallback_data, headers=headers, auth=auth, timeout=10)
+                try:
+                    fallback_json = res_fallback.json()
+                except Exception:
+                    fallback_json = {}
+
+                if res_fallback.status_code == 200 and fallback_json.get("access_token"):
+                    res = res_fallback
+                    res_json = fallback_json
+                    effective_grant = "authorization_code"
 
         if res.status_code != 200:
+            err_detail = res_json.get("error_description") or res_json.get("error") or res.text[:300]
+            if err_detail == "invalid_code":
+                err_detail = (
+                    "Invalid Code: The authorization/grant code was rejected by the provider. "
+                    "If this is a Zoho Self-Client Grant Token, note that: "
+                    "(1) It expires in 10 minutes, "
+                    "(2) It is strictly single-use, "
+                    "(3) Verify your Zoho datacenter (.in vs .com)."
+                )
             return {
                 "success": False,
                 "status_code": res.status_code,
-                "error": f"Token endpoint returned HTTP {res.status_code}: {res.text[:300]}",
-                "duration_ms": duration_ms
+                "error": f"Token endpoint returned HTTP {res.status_code}: {err_detail}",
+                "duration_ms": duration_ms,
             }
 
-        res_json = res.json()
         access_token = res_json.get("access_token")
         if not access_token:
+            err_msg = res_json.get("error") or str(res_json)
+            if err_msg == "invalid_code":
+                err_msg = (
+                    "Invalid Code: If this is a Zoho Self-Client Grant Token, "
+                    "it may have expired (10 min limit) or already been consumed. "
+                    "Please generate a fresh code in Zoho Developer Console."
+                )
             return {
                 "success": False,
                 "status_code": res.status_code,
-                "error": f"No 'access_token' found in JSON response: {res_json}",
-                "duration_ms": duration_ms
+                "error": f"No 'access_token' returned: {err_msg}",
+                "duration_ms": duration_ms,
             }
+
+        # If a permanent refresh_token was returned (e.g. from authorization_code exchange), pass it to the UI!
+        returned_refresh_token = res_json.get("refresh_token")
+
+        msg = f"OAuth 2.0 ({effective_grant}) token handshake successful!"
+        if effective_grant == "authorization_code" and returned_refresh_token:
+            msg = "Grant token successfully exchanged! Permanent refresh token retrieved and ready to save."
 
         return {
             "success": True,
+            "access_token": access_token,
+            "refresh_token": returned_refresh_token,
+            "api_domain": res_json.get("api_domain"),
             "token_type": res_json.get("token_type", data.header_prefix or "Bearer"),
             "expires_in": res_json.get("expires_in", 3600),
             "scope": res_json.get("scope", data.scope or ""),
             "duration_ms": duration_ms,
-            "message": f"OAuth 2.0 ({effective_grant}) token handshake successful!"
+            "message": msg,
         }
     except Exception as e:
         duration_ms = round((time.time() - start_time) * 1000)
         return {
             "success": False,
             "error": str(e),
-            "duration_ms": duration_ms
+            "duration_ms": duration_ms,
         }
 
 

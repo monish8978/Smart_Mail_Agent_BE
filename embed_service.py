@@ -32,6 +32,16 @@ _model = None
 @app.on_event("startup")
 def load_model():
     global _model
+    import os
+    # Constrain CPU thread thrashing across OpenMP/MKL/PyTorch
+    try:
+        import torch
+        torch.set_num_threads(int(os.getenv("TORCH_NUM_THREADS", "2")))
+        torch.set_num_interop_threads(int(os.getenv("TORCH_INTEROP_NUM_THREADS", "1")))
+        logger.info(f"⚡ Set PyTorch threads: num_threads={torch.get_num_threads()}")
+    except Exception as th_err:
+        logger.warning(f"⚠️ Could not set torch num threads: {th_err}")
+
     from sentence_transformers import SentenceTransformer
     logger.info(f"🔄 Loading embedding model '{MODEL_NAME}' — this happens ONCE at startup...")
     _model = SentenceTransformer(MODEL_NAME)

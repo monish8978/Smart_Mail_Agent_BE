@@ -553,6 +553,10 @@ def process_email_task(self, data: Dict[str, Any]):
         else:
             raise self.retry(exc=e, countdown=10)
     finally:
+        try:
+            current_client_id.reset(ctx_token)
+        except Exception:
+            pass
         publish_email_update(client_id)
 
 

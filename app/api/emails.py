@@ -138,7 +138,7 @@ def get_emails_logs_endpoint(client_id: str, user: dict = Depends(get_current_us
                     ui_status = "New"
                     if r[6] in ["sent", "ticket_created_and_sent"]:
                         ui_status = "Replied" if r[6] == "sent" else "Ticket_Generated"
-                    elif r[6] in ["send_failed", "ticket_created_send_failed"]:
+                    elif r[6] in ["failed", "send_failed", "ticket_created_send_failed", "ticket_creation_failed"]:
                         ui_status = "Failed"
                     elif r[6] == "pending":
                         ui_status = "Processing"

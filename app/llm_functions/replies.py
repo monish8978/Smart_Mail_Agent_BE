@@ -101,7 +101,8 @@ Requirements:
 1. Start with greeting: Hi {customer_name},
 2. Acknowledge that ticket #{ticket_id} is registered and the team is reviewing their inquiry.
 3. Keep it to 2-3 sentences.
-4. Conclude with:
+4. Write in plain text only. Do NOT use markdown formatting (such as **, _, or #), bullet points, or special characters.
+5. Conclude with:
 Thanks & Regards,
 {team_name}
 
@@ -138,7 +139,9 @@ Instructions:
 - Be professional
 - Be concise
 - Do NOT hallucinate
+- Write in plain text only. Do NOT use markdown formatting (such as **, _, or #), bullet points, or special characters.
 - NEVER claim or state that a ticket has been created, and NEVER output placeholder ticket references like "[Insert Ticket ID]" or "[Ticket Number]" or "[Ticket ID]".
+- DO NOT append placeholder names like "[Your Name]" to the sign-off.
 {status_guardrails}
 - If previous conversation exists above, maintain continuity — do not repeat what was already addressed
 - If no answer available, say politely
@@ -148,7 +151,6 @@ Write the email reply.
 
 Email Ending
 Thanks & Regards,
-dont add name section example "[Your Name]"
 Department: {department_name or 'derive from agent_type'}
 Company: {company_name or 'derive from context/email'}
 """
@@ -252,7 +254,8 @@ Requirements:
 3. Let them know they are welcome to reach back out anytime if they need any further assistance.
 4. Keep it concise (2-3 sentences total).
 5. Tone: {response_tone}
-6. Conclude with:
+6. Write in plain text only. Do NOT use markdown formatting (such as **, _, or #), bullet points, or special characters.
+7. Conclude with:
 Thanks & Regards,
 {team_name}
 
@@ -322,7 +325,8 @@ Requirements:
 2. Politely mention that we received their email, but we were unable to identify a clear support request or inquiry from the message.
 3. Invite them to reply with specific details or order/account information if they require assistance with our products or services.
 4. Keep it concise, respectful, and helpful (2-3 sentences max).
-5. Conclude with:
+5. Write in plain text only. Do NOT use markdown formatting (such as **, _, or #), bullet points, or special characters.
+6. Conclude with:
 Thanks & Regards,
 {team_name}
 
