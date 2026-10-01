@@ -37,9 +37,10 @@ logger = logging.getLogger(__name__)
 # Kept as the same on-disk path/volume the old Chroma implementation used —
 # this directory is already mounted into api/worker/listener in
 # docker-compose.yml. Only the fallback JSON file lives here now.
-CHROMA_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "chroma_db")
-os.makedirs(CHROMA_PATH, exist_ok=True)
-FALLBACK_DB_PATH = os.path.join(CHROMA_PATH, "fallback_db.json")
+FALLBACK_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "knowledge_fallback")
+CHROMA_PATH = FALLBACK_PATH  # Backward compatibility alias
+os.makedirs(FALLBACK_PATH, exist_ok=True)
+FALLBACK_DB_PATH = os.path.join(FALLBACK_PATH, "fallback_db.json")
 
 from app.vector_store import (
     ensure_collection,

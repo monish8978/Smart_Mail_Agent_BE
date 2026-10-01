@@ -42,10 +42,6 @@ def init_all_tables():
     from app.email_disclaimers import ensure_email_disclaimers_table
     from app.paused_email_history import ensure_paused_email_history_table
     from app.auth import ensure_users_table, ensure_admin_seeded
-    from app.email_credential import (
-        ensure_create_payload_table,
-        ensure_payload_get_ticket_table,
-    )
 
     logger.info("🛠️ Initializing all database schemas and tables...")
     
@@ -66,9 +62,5 @@ def init_all_tables():
         with db.cursor() as cursor:
             ensure_paused_email_history_table(cursor)
         db.commit()
-
-    # 5. Legacy tables (if still required)
-    ensure_create_payload_table()
-    ensure_payload_get_ticket_table()
 
     logger.info("✅ Database schema initialization completed successfully.")

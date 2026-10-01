@@ -1,190 +1,131 @@
-# Mail AI Automation / AI Mail Agent — Client Guide
+# Mail AI Automation Platform — Client & Operator Guide
 
-This guide explains how the system works from your side as a client, what you can control, and what to expect when a customer email comes in. It leaves out the technical/developer details (API routes, database fields, etc.) and focuses on what you can actually see and do.
+This guide explains how the AI Mail Agent operates from the client and operations perspective: what the system does automatically, what controls and switches you have, and how customer email conversations are handled end-to-end.
 
 ---
 
 ## 1. Getting Started
 
-Your account is set up by an admin, who gives you:
-- A login (email + password)
-- Your inbox connection (the email address the system watches for customer messages)
-- Default settings: how confident the AI needs to be before it auto-replies, and what tone it should write in
+Your client account is provisioned by a system administrator with:
+- **Account Credentials**: Secure login for the web dashboard.
+- **Mailbox Connection**: The IMAP/SMTP credentials for the mailbox monitored by the system.
+- **Tenant Policies**: Your company name, department, reply tone, and AI confidence threshold.
 
-Once you're set up, you log in and get access to your own dashboard. You can only see and manage your own data — you cannot see other clients' emails, tickets, or settings, and they cannot see yours.
-
-**What you can edit yourself:**
-- Your department and company name
-- Your inbox email/password, confidence threshold, and reply tone
+Each client runs in complete tenant isolation. You can only view and manage your own emails, tickets, knowledge base documents, and connector configurations.
 
 ---
 
-## 2. How an Incoming Email Gets Handled
+## 2. How Incoming Emails Are Handled
 
-Every customer email that lands in your inbox goes through the same pipeline automatically — you don't have to do anything for it to start:
+Every customer email received in your monitored inbox automatically passes through a four-stage pipeline:
 
-1. **It's picked up** — either the system is watching your inbox directly, or an email gets submitted to it directly.
-2. **It's checked against your rules first** — is this sender paused? Does the message contain a keyword you've blocked? If either is true, the AI does not touch it (see Sections 6 and 7).
-3. **The AI reads it** — figures out whether it's a general question or a ticket/order status check, and gauges the customer's tone (angry, neutral, happy) and urgency.
-4. **If the customer mentions more than one ticket/order number**, the system doesn't guess — it asks them to clarify which one they mean before doing anything else.
+```
+Incoming Customer Email
+         │
+         ▼
+ 1. Safety Filters       ──▶ Bot switch OFF / Daemon Bounce / Blocked Keywords?
+         │                   └──▶ Dropped or routed to review queue
+         ▼
+ 2. Context Enrichment   ──▶ Classifies intent, sentiment, urgency & threading
+         │
+         ▼
+ 3. Autonomous Agent     ──▶ Evaluates customer context & executes necessary tools:
+         │                   • Semantic Knowledge Base retrieval (RAG)
+         │                   • CRM/ERP order & ticket status lookup
+         │                   • Multi-turn customer clarification request
+         │                   • Ticket escalation and creation
+         ▼
+ 4. Quality Evaluation   ──▶ Confidence score (0–100) vs. your threshold:
+                             • Meets threshold & auto-send enabled ──▶ Sent automatically
+                             • Low confidence or review required  ──▶ Placed in Review Queue
+```
 
-From there, one of three things happens:
-
-### Path A — "What's the status of my ticket/order?"
-If the email clearly references a ticket or order number, the system looks it up in your connected CRM/ticketing system.
-- **Found it** → AI writes a status update and sends it automatically.
-- **Can't find it** → the customer gets a polite message asking them to double check the ID. The conversation is now "waiting on the customer" until they reply.
-
-### Path B — General question
-If there's no ticket number, the system searches your knowledge base (FAQs, policies, docs you've uploaded) for an answer.
-- If it finds a good answer **and** is confident enough (based on your threshold setting), it replies automatically.
-- If it's not confident, or finds nothing useful, it does **not** guess or send a weak answer — it quietly moves to Path C instead. The customer never sees a low-quality draft.
-
-### Path C — Escalation / new ticket
-This is the fallback for anything the first two paths couldn't resolve:
-- If the customer was previously asked to confirm a ticket ID and still can't be matched, the system creates a brand-new ticket from their description and lets them know.
-- If there was never a ticket ID at all, it creates one directly.
-- If the AI finds multiple *old* tickets in the conversation history and isn't sure which one is relevant, it asks the customer to clarify rather than guessing.
-
-### When automation is intentionally skipped
-- You can turn off auto-ticket-creation or auto-send for your account — replies then wait for your manual approval instead of going out on their own.
-- If anything fails along the way (ticket couldn't be created, email couldn't be sent, AI reply couldn't be scored), the email is never silently dropped — it lands in a "pending manual review" queue for a human to handle.
-
----
-
-## 3. Feature Switches
-
-These are on/off controls for how much the AI is allowed to do on your behalf (set by your admin, visible to you):
-
-- **Ticket creation** — can the system open tickets automatically?
-- **Auto-send** — can it send high-confidence replies on its own, or should everything wait for your approval first?
-- **Knowledge base search** — should it try to answer from your uploaded docs at all?
-- **Order/ticket tracking** — should it try to detect and look up ticket/order numbers?
-- **Manual reply tools** — is manual reply available to you?
-
-Turning any of these off doesn't break the pipeline — it just makes that step fall through to a human review queue instead.
+### Flow Highlights:
+- **Direct Answers**: If the customer asks a policy or product question answered in your Knowledge Base, the agent composes a grounded, professional response.
+- **Order & Ticket Inquiries**: If an order ID or ticket reference is provided, the agent queries your connected CRM/ERP API using your approved connector and replies with real-time status.
+- **Ambiguity & Clarification**: If a customer provides conflicting references or incomplete details, the agent politely requests clarification rather than hallucinating an answer.
+- **Escalation**: When an issue cannot be resolved automatically or diagnostics fail, the agent creates a ticket in your CRM and confirms the ticket reference with the customer.
+- **Safety First**: Delivery failures, mailer-daemon bounces, and automated out-of-office notifications are dropped immediately to avoid infinite email reply loops.
 
 ---
 
-## 4. Reviewing What Happened
+## 3. Operational Feature Switches
 
-You get a full activity log and dashboard, without having to dig through raw email:
+You have granular control over what the AI is permitted to perform on your behalf:
 
-- **Email log** — every message the system touched: who sent it, what it said, what the AI replied (if anything), how confident it was, current status (New / Replied / Ticket Created / Failed / Pending Review), sentiment, urgency, and a plain step-by-step trace of what the system actually did with it.
-- **Ticket list** — every support ticket opened on your behalf, with status, urgency, and timestamps.
-- **Dashboard stats** — totals for emails processed, pending items, AI replies sent, failed sends, tickets created, orders tracked, and average AI confidence — filterable by today, yesterday, this month, last month, or a custom date range.
-
-### If a reply is waiting on you
-- **Approve as-is** — send the AI's drafted reply exactly as written.
-- **Write your own** — skip the AI entirely and send your own reply. This is also how you close out items sitting in your review queues (see below) — but a queue item is only marked "handled" once the email actually sends successfully. If sending fails, it stays open so nothing gets lost.
+- **Master Bot Switch**: Global kill-switch. When turned OFF, incoming emails bypass the AI completely and route to your manual queue.
+- **Auto-Send**: When ON, replies scoring above your confidence threshold are dispatched directly to the customer. When OFF, all generated drafts wait for human approval.
+- **Auto-Ticket Creation**: Allows the agent to open new CRM tickets when complex issues cannot be answered automatically.
+- **Knowledge Base Search**: Enables or disables semantic search across your uploaded documents.
+- **Order Tracking**: Enables or disables automated lookups against external order APIs.
 
 ---
 
-## 5. Pausing a Customer Conversation
+## 4. Live Inbox & Review Queue
 
-Sometimes you want to personally handle a conversation without the AI jumping in — pausing lets you do that per customer email address.
+The web dashboard provides real-time visibility into all incoming and outgoing mail:
 
-- Pause a sender — no more auto-replies to that address until you unpause.
-- Unpause — hands control back to the AI.
-- See who's currently paused.
-
-**Nothing is lost while paused.** Every email from a paused sender still shows up in your main log *and* in a dedicated "paused" review queue, so you can catch up on exactly what came in while you were handling things manually. You can filter that queue by whether it's still pending, already ignored, or already replied to, and you can group it by sender. Unpausing someone doesn't erase their history in this queue — it just lets new emails through again.
-
----
-
-## 6. Blocking Keywords
-
-You can set up a list of words or phrases that automatically pull a matching email out of the normal AI pipeline — useful for legal threats, complaints that need a human touch, VIP names, etc.
-
-- Add or remove keywords anytime.
-- View your current list.
-- Matched emails go into their own review queue, separate from the paused-sender one, with the same pending/ignored/replied states.
-- You can clear a backlog of these in one action instead of going one by one.
-- Reply directly from this queue the same way you would for a paused email.
+- **Real-Time Streaming**: Inbound emails and automated agent actions appear instantly via WebSockets without manual page refreshes.
+- **Multi-Turn Thread Inspection**: View complete conversation histories showing both customer messages and agent responses with timestamps and sentiment badges.
+- **Human-in-the-Loop Actions**:
+  - **Approve Draft**: Inspect the AI-drafted reply and send it with one click.
+  - **Edit & Send**: Tweak the wording before dispatching.
+  - **Manual Reply**: Compose your own custom response, bypassing the AI.
+  - **Mark Ignored / Resolved**: Clear queue backlogs when an email requires no outbound reply.
 
 ---
 
-## 7. Connecting Your CRM / Ticketing System
+## 5. Pausing Customer Conversations
 
-Rather than the system being locked to one specific CRM, you connect your own system by telling it:
-- **What kind of action this connection handles** — checking a ticket's status, or creating a new one.
-- **Where to send the request** and how to log in (a token, username/password, or an API key) — your credentials are encrypted and never shown back to you in plain text.
-- **What the outgoing message should look like** — built from a set of fields the system fills in automatically per email (customer email, subject, message, ticket ID, sentiment, urgency, etc.).
-- **How to read the response** — which parts of your CRM's reply contain the ticket ID and status.
-
-**Nothing goes live automatically.** Every new connection starts in a "waiting for approval" state and is reviewed by an admin before it's used on a real customer email. This exists specifically so nothing you configure can start hitting an external system — or an unintended one — without a second set of eyes.
-
-**Don't want to write the request format by hand?** Describe your CRM in plain language (and paste in a sample response if you have one), and the system will draft the request and response format for you. This is a **preview only** — nothing is saved until you review it and submit it for approval.
-
-**Updating a connection later** doesn't cause downtime — submitting an update creates a new version waiting for approval, while your current live connection keeps working exactly as before until the new one is approved.
-
-You can see all of your connections and their status (draft, waiting for approval, live, or disabled) at any time. Anything using more delicate response-parsing rules is flagged for extra reviewer attention.
-
-**What you can't do:** approve or reject your own connection — that's admin-only, by design, so nothing you build can quietly go live without review.
+If an agent needs to handle a sensitive customer thread manually, you can pause that specific sender:
+- **Pause Sender**: Stops all automated AI replies to that email address until unpaused.
+- **Audit Queue**: Emails received while paused are preserved in your **Paused Emails** queue (`pending_review`, `ignored`, or `replied`).
+- **Unpause**: Resumes automated AI processing for future messages from that sender.
 
 ---
 
-## 8. Knowledge Base
+## 6. Keyword Blocking Rules
 
-Upload anything you want the AI to be able to answer from — policies, FAQs, product docs.
-
-- Add content directly, or upload a file (PDF, Word, or plain text) and it's read and indexed automatically.
-- See everything you've uploaded.
-- Remove anything that's outdated.
-- Test what the AI would answer for a given question before trusting it in production — so you're not finding gaps the hard way, in front of a real customer.
+Protect your brand by intercepting messages containing specific words or phrases (e.g. legal threats, executive complaints, VIP keywords):
+- **Policy Rules**: Configure keywords that automatically pull matching emails out of the AI pipeline.
+- **Dedicated Queue**: Intercepted messages route to the **Blocked Keyword Queue** where operators can review context and send manual replies.
 
 ---
 
-## 9. Conversation History
+## 7. Connecting Your CRM & Helpdesk (Connectors)
 
-You can pull up the recent back-and-forth with any specific customer — both what they said and what the system (or you) replied. You can also clear the short-term cached version of that history if needed; this doesn't erase the permanent ticket record, just the fast-access copy.
-
----
-
-## 10. Real-Time Updates
-
-Your dashboard stays live — when a new email comes in and gets processed, it shows up without you needing to refresh the page.
-
----
-
-## 11. Cost & Usage Visibility
-
-- See how much AI usage you're generating: number of requests, tokens used, cost, average response time — broken down by which part of the pipeline is using it (intent detection vs. reply drafting, etc.) and a recent activity log.
-- If your admin has set you a monthly budget, you can see your spend against it and whether you're on track, close to the limit, or over it. This is informational only — going over budget never stops the system from working.
+The platform supports dynamic connections to any REST API (Zoho Desk, Zendesk, Freshdesk, Salesforce, custom ERPs):
+- **Actions Supported**: Order status lookup, ticket status lookup, payment status lookup, and ticket creation.
+- **Secure Credentials**: All API keys, Bearer tokens, and Basic Auth credentials are encrypted at rest with Fernet cryptography.
+- **AI-Assisted Template Generator**: Describe your CRM's endpoint format in plain English or paste a sample JSON response; the system drafts the request template and JMESPath response mapping automatically.
+- **Admin Approval Gate**: Every new connection or updated revision starts in `pending_approval` and must be approved by an administrator before going live, preventing unintended external calls.
+- **Zero-Downtime Updates**: Modifying a live connector creates a new revision while the existing live connector continues serving production emails uninterrupted.
 
 ---
 
-## 12. What You Can and Can't Do — Quick Reference
+## 8. Knowledge Base Management
 
-| Category | You Can | You Can't |
+Train the agent on your business policies, FAQs, and product documentation:
+- **Document Ingestion**: Upload PDF, text, or spreadsheet files. Content is extracted, chunked, and embedded into the vector database automatically.
+- **Semantic Retrieval Sandbox**: Test queries directly in the dashboard to inspect what chunks the vector store retrieves and what similarity scores they achieve before going live.
+- **Resilient Fallback**: If the vector database is undergoing maintenance, queries transparently fall back to encrypted local document stores.
+
+---
+
+## 9. AI Telemetry & Budget Controls
+
+- **Token & Cost Analytics**: Monitor daily, weekly, and monthly LLM token usage, request counts, and dollar spend across models (Groq, OpenAI, Anthropic, Gemini).
+- **Monthly Budget Quotas**: Administrators can set monthly spending limits per tenant. The dashboard displays real-time burn-rate gauges and dispatches alerts when approaching thresholds.
+
+---
+
+## 10. Operational Summary Table
+
+| Capability | Client Permissions | Admin Permissions |
 |---|---|---|
-| Account | Update your profile, inbox settings, confidence threshold | Recreate/delete accounts |
-| Emails | View your logs, approve/send replies, reply manually | — |
-| Pausing | Pause/unpause any sender, review the paused queue | — |
-| Blocked keywords | Manage your keyword list and how it's handled, review the queue | — |
-| CRM connections | Create, edit, get an AI-drafted starting point, view your own | Approve or reject your own connection |
-| Knowledge base | Upload, test, and delete your own documents | — |
-| Tickets | View your own tickets | — |
-| Usage & cost | View your own usage and budget status | — |
-
----
-
-## 13. A Few Things Worth Knowing
-
-- **A weak or missing answer is never sent just to have *something* go out.** If the AI isn't confident, or the CRM/knowledge base has nothing useful, the email is escalated rather than answered badly.
-- **Your data is isolated.** Even though the system serves many clients at once, your emails, tickets, knowledge base, and credentials are kept separate from everyone else's.
-- **Nothing external happens without review.** New CRM connections, in particular, always go through an approval step — an AI-drafted or self-configured connection can't quietly start talking to an unintended system.
-- **Failures don't disappear.** Every point where something could go wrong (a send failing, a ticket failing to create, a score failing to compute) routes to a manual review queue instead of silently dropping the email.
-
----
-
-## 14. Future Plans
-
-These are improvements planned or under active consideration — not live yet, included here so you know what's coming and can plan around it:
-
-- **Microsoft Outlook / Microsoft 365 support** — as an alternative to Gmail-only inbox connections, so clients on Microsoft can connect their inbox directly instead of switching providers. Still being decided: whether new mail is delivered instantly (push-based) or checked on a schedule.
-- **Yahoo Mail support** — another inbox option alongside Gmail, for clients whose support inbox runs on Yahoo rather than switching providers just to use this system.
-- **Better visibility into system health** — infrastructure-side improvements (like log storage limits) planned so the system stays reliable as usage grows, without requiring any changes on your end.
-- **Rotating security keys** — the underlying encryption used to protect your stored credentials will support periodic key rotation, an added layer of protection with no action needed from you.
-- **Choice of AI provider** — right now the system runs on one AI provider (Groq) behind the scenes. The plan is to let this be switched — Anthropic, Gemini, OpenAI, etc. — so you're not locked into a single provider's pricing, speed, or availability. Note this is a backend flexibility improvement, not something that changes how you use the system day to day.
-
+| Mailbox Configuration | View & Update IMAP/SMTP credentials | Provision & delete client accounts |
+| Feature Switches | Toggle Auto-Send, Bot Switch, Ticket Creation | Set global tenant defaults |
+| Inbox & Threads | View logs, approve drafts, send manual replies | View system-wide logs & health |
+| CRM Connectors | Create, draft with AI, submit for approval | Approve or reject connector revisions |
+| Knowledge Base | Upload, delete, and test semantic documents | Manage cluster embedding settings |
+| LLM Telemetry | View token usage and cost burn-rate | Allocate monthly spending limits & models |

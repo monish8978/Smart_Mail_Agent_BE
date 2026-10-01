@@ -23,7 +23,8 @@ redis_client = get_redis_history()
 # ==============================
 def _make_key(client_id: str, from_email: str, thread_id: str = "") -> str:
     if thread_id:
-        return f"chat_history:{client_id}:th_{thread_id}"
+        tid = thread_id if thread_id.startswith("th_") else f"th_{thread_id}"
+        return f"chat_history:{client_id}:{tid}"
     return f"chat_history:{client_id}:{from_email}"
 
 

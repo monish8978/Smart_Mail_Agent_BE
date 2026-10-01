@@ -6,8 +6,6 @@ from app.url_allowlist import ensure_url_allowlist_table
 from app.connector_config import ensure_connector_configs_table
 from app.email_disclaimers import ensure_email_disclaimers_table
 from app.email_credential import (
-    ensure_payload_get_ticket_table,
-    ensure_create_payload_table,
     ensure_accounts_table_startup,
     ensure_ticket_record_table,
 )
@@ -522,8 +520,6 @@ async def initialize_database_and_services():
         asyncio.to_thread(ensure_connector_configs_table),
         asyncio.to_thread(_run_ensure_draft_emails_table),
         asyncio.to_thread(_run_ensure_accounts_table),
-        asyncio.to_thread(ensure_create_payload_table),
-        asyncio.to_thread(ensure_payload_get_ticket_table),
         asyncio.to_thread(ensure_users_table),
         asyncio.to_thread(ensure_paused_emails_table),
         asyncio.to_thread(ensure_global_llm_tables),

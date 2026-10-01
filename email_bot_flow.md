@@ -34,7 +34,7 @@ graph TD
         C["Intent Detection<br/>(LLM Model)"]:::bot
         D{"Routing Decision"}:::bot
         E1["Fetch Status CRM API<br/>(GET /order-status)"]:::api
-        E2["Query RAG<br/>(ChromaDB / Legacy RAG)"]:::bot
+        E2["Query RAG<br/>(Qdrant / Knowledge Fallback)"]:::bot
         F["Draft Response & Score<br/>(LLM Model)"]:::bot
     end
     

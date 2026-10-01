@@ -57,7 +57,7 @@ services:
       - ./app:/app/app
       - ./worker:/app/worker
       - ./tests:/app/tests
-      - ./chroma_db:/app/chroma_db   # now only used for the JSON fallback store — keep the mount
+      - ./knowledge_fallback:/app/knowledge_fallback   # shared JSON fallback store
     command: uvicorn app.main:app --host 0.0.0.0 --port 8024 --reload
     mem_limit: 512m
     depends_on:
@@ -82,7 +82,7 @@ services:
       - ./app:/app/app
       - ./worker:/app/worker
       - ./tests:/app/tests
-      - ./chroma_db:/app/chroma_db   # shared JSON fallback path — must stay mounted in api/worker/listener together
+      - ./knowledge_fallback:/app/knowledge_fallback   # shared JSON fallback store
     mem_limit: 2g
     depends_on:
       redis:
@@ -105,7 +105,7 @@ services:
     volumes:
       - ./app:/app/app
       - ./worker:/app/worker
-      - ./chroma_db:/app/chroma_db
+      - ./knowledge_fallback:/app/knowledge_fallback
     working_dir: /app
     restart: always
     mem_limit: 512m

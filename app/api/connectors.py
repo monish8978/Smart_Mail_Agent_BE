@@ -13,12 +13,6 @@ from app.db import get_db_ctx
 from app.email_credential import (
     get_email_account,
     create_email_record_db,
-    insert_create_payload_ticket,
-    insert_payload_get_ticket,
-    get_create_payload_table,
-    get_payload_get_ticket_table,
-    get_all_create_payloads,
-    get_all_get_payloads,
     get_connector_cap,
 )
 from app.order_routes import get_order_by_id
@@ -288,48 +282,6 @@ def ticket_status_endpoint(data: TicketStatusRequest, user: dict = Depends(get_c
         return {"status": "success", "data": res.get("data", {})}
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/insert-create_payload_ticket")
-def create_payload_ticket_endpoint(data: PayloadRequest, user: dict = Depends(get_current_user)):
-    require_client_access(data.client_id, user)
-    try:
-        res_id = insert_create_payload_ticket(client_id=data.client_id, url=data.url, paylod=data.paylod)
-        return {"status": "success", "client_id": res_id}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/insert-payload_get_ticket")
-def payload_get_ticket_endpoint(data: PayloadRequest, user: dict = Depends(get_current_user)):
-    require_client_access(data.client_id, user)
-    try:
-        res_id = insert_payload_get_ticket(client_id=data.client_id, url=data.url, paylod=data.paylod)
-        return {"status": "success", "client_id": res_id}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/get-create_payload/{client_id}")
-def get_create_payload_endpoint(client_id: str, user: dict = Depends(get_current_user)):
-    require_client_access(client_id, user)
-    try:
-        if client_id == "ALL":
-            return get_all_create_payloads()
-        return get_create_payload_table(client_id)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/get-get_payload/{client_id}")
-def get_payload_get_endpoint(client_id: str, user: dict = Depends(get_current_user)):
-    require_client_access(client_id, user)
-    try:
-        if client_id == "ALL":
-            return get_all_get_payloads()
-        return get_payload_get_ticket_table(client_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

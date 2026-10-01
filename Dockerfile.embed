@@ -14,8 +14,6 @@ WORKDIR /app
 COPY requirements.embed.txt .
 RUN pip install --no-cache-dir -r requirements.embed.txt
 
-COPY embed_service.py .
-
 # Pre-download the model at build time so the container doesn't hit the
 # network on first boot and so `docker compose up` startup time is
 # dominated by torch import, not a cold HF Hub download.
@@ -29,6 +27,10 @@ RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTr
 # seen in production logs at container start; setting it any earlier than
 # this in the Dockerfile breaks the build (see NOTE above).
 ENV HF_HUB_OFFLINE=1
+
+# Copy embed_service.py after the model layer so code edits do not invalidate
+# the downloaded model cache layer.
+COPY embed_service.py .
 
 EXPOSE 8500
 

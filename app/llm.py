@@ -10,7 +10,7 @@ from app.llm_prompts import *
 from app.llm_functions import *
 
 # Explicitly re-export key runtime symbols
-from app.llm_config import client, current_client_id, telemetry_create, resolve_model, resolve_langchain_model
+from app.llm_config import client, current_client_id, telemetry_create, resolve_model
 from app.llm_utils import strip_reasoning_and_think_tags, extract_name_from_email, extract_ticket_and_order_ids
 from app.llm_pricing import calculate_llm_cost, log_llm_metrics_db
 from app.llm_prompts import AgentType, AGENT_PROMPTS, TONE_INSTRUCTIONS, get_agent_prompt

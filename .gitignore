@@ -10,6 +10,7 @@ __pycache__/
 *.log
 
 # Data directories
+knowledge_fallback/
 chroma_db/
 qdrant_storage/
 
