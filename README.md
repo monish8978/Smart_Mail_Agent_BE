@@ -10,8 +10,11 @@ An enterprise-grade autonomous email processing, support triage, and customer re
 |---|---|---|
 | 📖 [**Architecture & Execution Flow**](file:///home/hyper_is_op/mail_ai_automation/docs/ARCHITECTURE_FLOW.md) | Backend & Integration Engineers | Mermaid lifecycle state charts, 4-stage pipeline specifications, and Celery task mechanics. |
 | 🧑‍💼 [**Operator & Client Guide**](file:///home/hyper_is_op/mail_ai_automation/docs/OPERATOR_GUIDE.md) | Support Leads & Tenant Operators | Non-technical manual: live review queues, pause controls, keyword filters, and monthly budgets. |
+| 🗄️ [**Database Schema & ERD**](file:///home/hyper_is_op/mail_ai_automation/docs/DATABASE_SCHEMA.md) | DBAs & Backend Engineers | Complete entity-relationship model and data dictionary for all 15+ relational tables. |
+| ⚙️ [**Configuration & Tuning**](file:///home/hyper_is_op/mail_ai_automation/docs/CONFIGURATION.md) | DevOps & System Administrators | Environment variables, Redis database partitioning, thread tunables, and circuit breakers. |
 | 🛠️ [**Operations Runbook**](file:///home/hyper_is_op/mail_ai_automation/docs/RUNBOOK.md) | DevOps & On-Call Engineers | Incident response, deep `/health` probes, component triage (Celery, Qdrant, PyTorch), and recovery. |
 | 🔌 [**REST API Reference**](file:///home/hyper_is_op/mail_ai_automation/docs/API_REFERENCE.md) | External Integrators | Direct email injection schemas, connector governance endpoints, and webhook error contracts. |
+| 📋 [**Release Changelog**](file:///home/hyper_is_op/mail_ai_automation/CHANGELOG.md) | All Stakeholders | SemVer release history tracking enhancements, bugfixes, and dependency changes. |
 
 ---
 
