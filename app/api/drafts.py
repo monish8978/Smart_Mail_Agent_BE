@@ -124,12 +124,48 @@ def update_draft_endpoint(draft_id: int, data: UpdateDraftRequest, user: dict = 
     return {"status": "success", "message": "Draft updated successfully"}
 
 
+class SendDraftRequest(BaseModel):
+    add_to_kb: Optional[bool] = False
+    kb_title: Optional[str] = None
+
+
 @router.post("/drafts/{draft_id}/send")
-def send_single_draft_endpoint(draft_id: int, user: dict = Depends(get_current_user)):
+def send_single_draft_endpoint(
+    draft_id: int, 
+    data: Optional[SendDraftRequest] = None, 
+    user: dict = Depends(get_current_user)
+):
     client_id = None if user.get("role") == "admin" else user.get("client_id")
+    # Fetch draft details before sending so we have subject/query/reply
+    draft = get_draft(draft_id, client_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft not found")
+
     res = send_single_draft(draft_id, client_id=client_id, reviewed_by=user.get("username", "Admin"))
     if not res.get("success"):
         raise HTTPException(status_code=400, detail=res.get("error", "Failed to dispatch draft"))
+
+    # Closed-Loop RAG Feedback: Index approved solution into vector store
+    added_to_kb = False
+    kb_doc_id = None
+    if data and data.add_to_kb:
+        try:
+            from app.rag import add_knowledge
+            target_client = draft.get("client_id")
+            subject = draft.get("subject", "Customer Inquiry")
+            q_text = (draft.get("original_body") or draft.get("body") or "").strip()
+            a_text = (draft.get("draft_reply") or "").strip()
+            title = data.kb_title or f"Verified Solution: {subject}"
+            content = f"Customer Inquired:\n{q_text}\n\nApproved Solution:\n{a_text}"
+            kb_doc_id = add_knowledge(target_client, title, content)
+            added_to_kb = True
+            logger.info(f"🧠 [Closed-Loop RAG] Indexed draft #{draft_id} into knowledge base for client {target_client} (doc_id={kb_doc_id})")
+        except Exception as kb_err:
+            logger.warning(f"⚠️ Failed to index approved draft into RAG: {kb_err}")
+
+    res["added_to_kb"] = added_to_kb
+    if kb_doc_id:
+        res["kb_doc_id"] = kb_doc_id
     return res
 
 

@@ -1,4 +1,5 @@
 import logging
+from typing import Optional
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 import pymysql
@@ -23,6 +24,7 @@ class ClientFeaturesRequest(BaseModel):
     feature_order_tracking: bool
     feature_manual_reply: bool
     feature_strip_disclaimers: bool = True
+    inactivity_timeout_hours: Optional[int] = 72
 
 
 @router.get("/admin/client-features/{client_id}")
@@ -37,7 +39,8 @@ def get_client_features_endpoint(client_id: str, user: dict = Depends(get_curren
                 COALESCE(feature_rag, 1) AS feature_rag,
                 COALESCE(feature_order_tracking, 1) AS feature_order_tracking,
                 COALESCE(feature_manual_reply, 1) AS feature_manual_reply,
-                COALESCE(feature_strip_disclaimers, 1) AS feature_strip_disclaimers
+                COALESCE(feature_strip_disclaimers, 1) AS feature_strip_disclaimers,
+                COALESCE(inactivity_timeout_hours, 72) AS inactivity_timeout_hours
             FROM email_accounts WHERE client_id=%s LIMIT 1
         """, (client_id,))
         row = cursor.fetchone()
@@ -48,7 +51,8 @@ def get_client_features_endpoint(client_id: str, user: dict = Depends(get_curren
                 "feature_rag": True,
                 "feature_order_tracking": True,
                 "feature_manual_reply": True,
-                "feature_strip_disclaimers": True
+                "feature_strip_disclaimers": True,
+                "inactivity_timeout_hours": 72
             }
         return {
             "feature_ticket_creation": bool(row["feature_ticket_creation"]),
@@ -56,7 +60,8 @@ def get_client_features_endpoint(client_id: str, user: dict = Depends(get_curren
             "feature_rag": bool(row["feature_rag"]),
             "feature_order_tracking": bool(row["feature_order_tracking"]),
             "feature_manual_reply": bool(row["feature_manual_reply"]),
-            "feature_strip_disclaimers": bool(row["feature_strip_disclaimers"])
+            "feature_strip_disclaimers": bool(row["feature_strip_disclaimers"]),
+            "inactivity_timeout_hours": int(row.get("inactivity_timeout_hours") or 72)
         }
 
 
@@ -65,16 +70,17 @@ def set_client_features(data: ClientFeaturesRequest, user: dict = Depends(get_cu
     require_client_access(data.client_id, user)
     with get_db_ctx() as db:
         with db.cursor() as cursor:
+            timeout_h = max(1, min(720, data.inactivity_timeout_hours or 72))
             cursor.execute("""
                 UPDATE email_accounts SET feature_ticket_creation=%s, feature_auto_send=%s,
                 feature_rag=%s, feature_order_tracking=%s, feature_manual_reply=%s,
-                feature_strip_disclaimers=%s
+                feature_strip_disclaimers=%s, inactivity_timeout_hours=%s
                 WHERE client_id=%s
             """, (data.feature_ticket_creation, data.feature_auto_send, data.feature_rag,
                   data.feature_order_tracking, data.feature_manual_reply,
-                  data.feature_strip_disclaimers, data.client_id))
+                  data.feature_strip_disclaimers, timeout_h, data.client_id))
             db.commit()
-    return {"status": "success"}
+    return {"status": "success", "inactivity_timeout_hours": timeout_h}
 
 
 # ==============================
@@ -163,3 +169,57 @@ def client_master_bot_toggle(data: ClientMasterBotToggleRequest, user: dict = De
         "client_bot_enabled": data.client_bot_enabled,
         "message": f"Client Master Switch set to {data.client_bot_enabled}"
     }
+
+
+# ==============================
+# 🚨 Proactive Webhook Alerts
+# ==============================
+
+class AlertSettingsRequest(BaseModel):
+    client_id: str
+    webhook_url: Optional[str] = None
+    alert_email: Optional[str] = None
+    alert_on_sla_breach: bool = True
+    alert_on_worker_stall: bool = True
+    alert_sla_hours: int = 4
+
+
+@router.get("/admin/alert-settings/{client_id}")
+def get_alert_settings_endpoint(client_id: str, user: dict = Depends(get_current_user)):
+    require_client_access(client_id, user)
+    from app.alert_service import get_alert_settings
+    return get_alert_settings(client_id)
+
+
+@router.put("/admin/alert-settings")
+def update_alert_settings_endpoint(data: AlertSettingsRequest, user: dict = Depends(get_current_user)):
+    require_client_access(data.client_id, user)
+    from app.alert_service import update_alert_settings
+    update_alert_settings(data.client_id, data.model_dump())
+    return {"status": "success", "message": "Alert and webhook settings updated"}
+
+
+@router.post("/admin/alert-settings/test")
+def test_alert_webhook_endpoint(data: AlertSettingsRequest, user: dict = Depends(get_current_user)):
+    require_client_access(data.client_id, user)
+    from app.alert_service import dispatch_webhook
+    if not data.webhook_url:
+        raise HTTPException(status_code=400, detail="Webhook URL is required to send a test alert")
+    ok = dispatch_webhook(data.webhook_url, {
+        "event_type": "test_ping",
+        "client_id": data.client_id,
+        "title": "Test Sentinel Ping",
+        "description": "Your Mail AI automated alert webhook is active and verified.",
+        "severity": "INFO",
+        "details": {
+            "Triggered By": user.get("username", "Operator"),
+            "Client ID": data.client_id,
+            "SLA Threshold": f"{data.alert_sla_hours} hours",
+            "SLA Alerts": "Enabled" if data.alert_on_sla_breach else "Disabled",
+            "Worker Alerts": "Enabled" if data.alert_on_worker_stall else "Disabled"
+        }
+    })
+    if not ok:
+        raise HTTPException(status_code=400, detail="Webhook delivery failed. Verify URL endpoint connectivity.")
+    return {"status": "success", "message": "Test alert successfully sent to webhook endpoint"}
+

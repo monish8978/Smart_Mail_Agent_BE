@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 # Dynamic tenant context variable
 current_client_id = contextvars.ContextVar("current_client_id", default="SYSTEM")
+current_thread_id = contextvars.ContextVar("current_thread_id", default="")
 
 _llm_configs_cache = {}
 _LLM_CONFIGS_CACHE_TTL = 30  # seconds
@@ -420,7 +421,7 @@ def telemetry_create(*args, caller: str | None = None, **kwargs):
             pass
 
     email_log_id = kwargs.pop("email_log_id", None)
-    thread_id = kwargs.pop("thread_id", None)
+    thread_id = kwargs.pop("thread_id", None) or current_thread_id.get() or None
 
     start_time = time.time()
     client_id = current_client_id.get()

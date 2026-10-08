@@ -84,6 +84,7 @@ class ClientProfileRequest(BaseModel):
     department_name: Optional[str] = None
     company_name: Optional[str] = None
     cost_multiplier: Optional[float] = None
+    inactivity_timeout_hours: Optional[int] = None
 
 
 @router.post("/admin/client-profile")
@@ -108,6 +109,13 @@ def set_client_profile(data: ClientProfileRequest, user: dict = Depends(require_
                     SET agent_type=%s, department_name=%s, company_name=%s, email=%s, password=%s
                     WHERE client_id=%s
                 """, (data.agent_type or "", data.department_name or "", data.company_name or "", data.imap_email or "", data.imap_password or "", data.client_id))
+
+            if data.inactivity_timeout_hours is not None:
+                cursor.execute("""
+                    UPDATE email_accounts
+                    SET inactivity_timeout_hours=%s
+                    WHERE client_id=%s
+                """, (data.inactivity_timeout_hours, data.client_id))
             
             db.commit()
     return {"success": True}
@@ -120,6 +128,7 @@ class SelfProfileRequest(BaseModel):
     score_threshold: Optional[int] = None
     agent_type: Optional[str] = None
     response_tone: Optional[str] = None
+    inactivity_timeout_hours: Optional[int] = None
 
 
 @router.post("/client/profile")
@@ -144,6 +153,9 @@ def update_self_profile(data: SelfProfileRequest, user: dict = Depends(get_curre
             if data.response_tone is not None:
                 updates.append("response_tone = %s")
                 params.append(data.response_tone)
+            if data.inactivity_timeout_hours is not None:
+                updates.append("inactivity_timeout_hours = %s")
+                params.append(data.inactivity_timeout_hours)
             
             if updates:
                 if data.client_id == "ALL" and user.get("role") == "admin":

@@ -19,6 +19,7 @@ class PipelineContext:
     references: Optional[str] = None
     thread_id: Optional[str] = None
     sender_name: Optional[str] = None
+    retry_log_id: Optional[int] = None
 
     # Troubleshooting & Resolution Tracking
     troubleshooting_step: int = 0
@@ -29,6 +30,8 @@ class PipelineContext:
 
     # Classification & Routing
     intent: Optional[str] = None
+    escalation_reason: Optional[str] = None
+    conversation_closed: bool = False
     sentiment: str = "Neutral"
     priority: str = "Medium"
     ticket_id: Optional[str] = None
@@ -88,7 +91,8 @@ class PipelineContext:
             troubleshooting_step=int(data.get("troubleshooting_step") or 0),
             is_resolved=bool(data.get("is_resolved") or False),
             sender_name=data.get("sender_name"),
-            history=list(data.get("history") or [])
+            history=list(data.get("history") or []),
+            retry_log_id=int(data["__retry_log_id__"]) if data.get("__retry_log_id__") else None
         )
 
     def to_task_data(self) -> Dict[str, Any]:
@@ -106,7 +110,9 @@ class PipelineContext:
             "thread_id": self.thread_id,
             "troubleshooting_step": self.troubleshooting_step,
             "is_resolved": self.is_resolved,
-            "sender_name": self.sender_name
+            "sender_name": self.sender_name,
+            "intent": self.intent,
+            "escalation_reason": self.escalation_reason
         }
 
     def log_step(self, step_name: str):

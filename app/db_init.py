@@ -81,6 +81,9 @@ def backfill_client_ids():
                     ("thread_id", "VARCHAR(100) NULL"),
                     ("is_resolved", "TINYINT(1) DEFAULT 0"),
                     ("troubleshooting_step", "INT DEFAULT 0"),
+                    ("intent", "VARCHAR(50) DEFAULT NULL"),
+                    ("escalation_reason", "VARCHAR(50) DEFAULT NULL"),
+                    ("conversation_closed", "TINYINT(1) DEFAULT 0"),
                 ]
                 for col_name, col_def in missing_email_log_cols:
                     if col_name not in existing_cols:
@@ -97,6 +100,11 @@ def backfill_client_ids():
                 if "idx_email_logs_thread" not in existing_indexes:
                     try:
                         cursor.execute("ALTER TABLE email_logs ADD INDEX idx_email_logs_thread (client_id, thread_id)")
+                    except Exception:
+                        pass
+                if "idx_email_logs_thread_created" not in existing_indexes:
+                    try:
+                        cursor.execute("ALTER TABLE email_logs ADD INDEX idx_email_logs_thread_created (client_id, thread_id, created_at)")
                     except Exception:
                         pass
                 
@@ -412,6 +420,10 @@ def ensure_llm_logs_table():
                     pass
                 try:
                     cursor.execute("ALTER TABLE llm_logs ADD INDEX idx_llm_client_created (client_id, created_at)")
+                except Exception:
+                    pass
+                try:
+                    cursor.execute("ALTER TABLE llm_logs ADD INDEX idx_llm_thread (client_id, thread_id)")
                 except Exception:
                     pass
                 db.commit()

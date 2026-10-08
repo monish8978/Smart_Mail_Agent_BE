@@ -163,6 +163,12 @@ def ensure_accounts_table_startup(cursor):
         ("oauth_provider", "VARCHAR(30) DEFAULT NULL"),
         ("oauth_client_id", "VARCHAR(255) DEFAULT NULL"),
         ("oauth_client_secret", "TEXT DEFAULT NULL"),
+        ("inactivity_timeout_hours", "INT DEFAULT 72"),
+        ("webhook_url", "VARCHAR(500) DEFAULT NULL"),
+        ("alert_email", "VARCHAR(255) DEFAULT NULL"),
+        ("alert_on_sla_breach", "BOOLEAN DEFAULT TRUE"),
+        ("alert_on_worker_stall", "BOOLEAN DEFAULT TRUE"),
+        ("alert_sla_hours", "INT DEFAULT 4"),
     ]
 
     for col_name, col_def in missing_cols:
@@ -214,6 +220,23 @@ def ensure_ticket_record_table(cursor):
         cursor.execute("ALTER TABLE ticket_record ADD COLUMN sentiment VARCHAR(50) DEFAULT NULL")
     if "priority" not in existing_cols:
         cursor.execute("ALTER TABLE ticket_record ADD COLUMN priority VARCHAR(50) DEFAULT NULL")
+    if "intent" not in existing_cols:
+        cursor.execute("ALTER TABLE ticket_record ADD COLUMN intent VARCHAR(50) DEFAULT NULL")
+    if "escalation_reason" not in existing_cols:
+        cursor.execute("ALTER TABLE ticket_record ADD COLUMN escalation_reason VARCHAR(50) DEFAULT NULL")
+    if "thread_id" not in existing_cols:
+        cursor.execute("ALTER TABLE ticket_record ADD COLUMN thread_id VARCHAR(100) DEFAULT NULL")
+    if "turns_to_escalate" not in existing_cols:
+        cursor.execute("ALTER TABLE ticket_record ADD COLUMN turns_to_escalate INT DEFAULT 1")
+
+    # Ensure index on (client_id, thread_id)
+    try:
+        cursor.execute("SHOW INDEX FROM ticket_record")
+        existing_idx = {r[2] for r in cursor.fetchall()}
+        if "idx_ticket_thread" not in existing_idx:
+            cursor.execute("ALTER TABLE ticket_record ADD INDEX idx_ticket_thread (client_id, thread_id)")
+    except Exception:
+        pass
 
 
 _ensure_table = ensure_ticket_record_table
@@ -256,29 +279,102 @@ def get_budget_status(client_id, cursor):
     """
     Returns current-month spend vs budget for a client.
     status: 'unlimited' (no budget set) | 'ok' | 'warning' (>=90%) | 'exceeded' (>=100%)
+    Includes billing turnover cycle, reset date, total tokens, daily burn velocity (avg, min, max),
+    and month-end trajectory projection.
     Never blocks anything — purely informational.
     """
     cursor.execute("SELECT monthly_budget_usd FROM email_accounts WHERE client_id=%s", (client_id,))
     row = cursor.fetchone()
     budget = float(row[0]) if row and row[0] is not None else None
 
-    cursor.execute("""
-        SELECT COALESCE(SUM(l.cost * COALESCE(ea.cost_multiplier, 1.0)), 0) 
+    # MTD Spend and Tokens
+    spend_query = """
+        SELECT 
+            COALESCE(SUM(l.cost * COALESCE(ea.cost_multiplier, 1.0)), 0) as mtd_cost,
+            COALESCE(SUM(l.prompt_tokens + l.completion_tokens), 0) as mtd_tokens
         FROM llm_logs l
         LEFT JOIN email_accounts ea ON l.client_id = ea.client_id
-        WHERE l.client_id=%s AND MONTH(l.created_at)=MONTH(CURDATE()) AND YEAR(l.created_at)=YEAR(CURDATE())
-    """, (client_id,))
-    spent = float(cursor.fetchone()[0] or 0)
+        WHERE MONTH(l.created_at)=MONTH(CURDATE()) AND YEAR(l.created_at)=YEAR(CURDATE())
+    """
+    spend_params = ()
+    if client_id != "ALL":
+        spend_query += " AND l.client_id=%s"
+        spend_params = (client_id,)
 
-    if budget is None:
-        return {"budget": None, "spent": round(spent, 4), "percent": None, "status": "unlimited"}
+    cursor.execute(spend_query, spend_params)
+    spend_row = cursor.fetchone()
+    spent = float(spend_row[0] or 0.0) if spend_row else 0.0
+    spent_tokens = int(spend_row[1] or 0) if spend_row else 0
 
-    percent = (spent / budget * 100) if budget > 0 else 0
-    if percent >= 100:
-        status = "exceeded"
-    elif percent >= 90:
-        status = "warning"
+    # Daily burn breakdown for the current month
+    daily_query = """
+        SELECT 
+            DATE(l.created_at) as log_day,
+            SUM(l.cost * COALESCE(ea.cost_multiplier, 1.0)) as day_cost,
+            SUM(l.prompt_tokens + l.completion_tokens) as day_tokens
+        FROM llm_logs l
+        LEFT JOIN email_accounts ea ON l.client_id = ea.client_id
+        WHERE MONTH(l.created_at)=MONTH(CURDATE()) AND YEAR(l.created_at)=YEAR(CURDATE())
+    """
+    if client_id != "ALL":
+        daily_query += " AND l.client_id=%s"
+    daily_query += " GROUP BY DATE(l.created_at)"
+
+    cursor.execute(daily_query, spend_params)
+    daily_rows = cursor.fetchall()
+
+    import datetime
+    import calendar
+    today = datetime.date.today()
+    current_day_of_month = today.day
+    _, days_in_month = calendar.monthrange(today.year, today.month)
+    next_reset_date = datetime.date(today.year + (1 if today.month == 12 else 0), 1 if today.month == 12 else today.month + 1, 1)
+    days_until_reset = (next_reset_date - today).days
+
+    if daily_rows:
+        day_costs = [float(r[1] or 0.0) for r in daily_rows]
+        day_tokens = [int(r[2] or 0) for r in daily_rows]
+        min_daily_cost = min(day_costs)
+        max_daily_cost = max(day_costs)
+        min_daily_tokens = min(day_tokens)
+        max_daily_tokens = max(day_tokens)
     else:
-        status = "ok"
+        min_daily_cost = 0.0
+        max_daily_cost = 0.0
+        min_daily_tokens = 0
+        max_daily_tokens = 0
 
-    return {"budget": budget, "spent": round(spent, 4), "percent": round(percent, 1), "status": status}
+    daily_avg_cost = round(spent / max(1, current_day_of_month), 4)
+    daily_avg_tokens = int(round(spent_tokens / max(1, current_day_of_month)))
+    projected_spend = round(daily_avg_cost * days_in_month, 4)
+
+    percent = (spent / budget * 100) if (budget and budget > 0) else 0
+    if budget is not None:
+        if percent >= 100:
+            status = "exceeded"
+        elif percent >= 90:
+            status = "warning"
+        else:
+            status = "ok"
+    else:
+        status = "unlimited"
+
+    return {
+        "budget": budget,
+        "spent": round(spent, 4),
+        "spent_tokens": spent_tokens,
+        "percent": round(percent, 1) if budget is not None else None,
+        "status": status,
+        "turnover_type": "Monthly (Calendar)",
+        "turnover_reset_date": next_reset_date.strftime("%Y-%m-%d"),
+        "days_until_reset": days_until_reset,
+        "daily_avg_consumption": {
+            "avg_cost": daily_avg_cost,
+            "min_cost": round(min_daily_cost, 4),
+            "max_cost": round(max_daily_cost, 4),
+            "avg_tokens": daily_avg_tokens,
+            "min_tokens": min_daily_tokens,
+            "max_tokens": max_daily_tokens
+        },
+        "projected_month_end_spend": projected_spend
+    }

@@ -562,3 +562,54 @@ def approve_pending_reply_endpoint(data: ApprovePendingReplyRequest, user: dict 
     push_message(client_id=data.client_id, from_email=from_email, role="support",
                  subject="Re: " + subject, body=reply, ticket_id="")
     return {"status": "success", "new_status": new_status}
+
+
+@router.post("/emails/{email_log_id}/retry")
+def retry_failed_email_endpoint(email_log_id: int, user: dict = Depends(get_current_user)):
+    """
+    DLQ Re-processing endpoint:
+    Resets a failed or stalled email record back to 'pending',
+    clears error summary, and re-dispatches into Celery pipeline.
+    """
+    with get_db_ctx() as db:
+        with db.cursor() as cursor:
+            cursor.execute("""
+                SELECT client_id, from_email, subject, body, body_html, message_id, in_reply_to, thread_id 
+                FROM email_logs 
+                WHERE id = %s
+            """, (email_log_id,))
+            row = cursor.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail=f"Email record #{email_log_id} not found")
+            client_id, from_email, subject, body, body_html, message_id, in_reply_to, thread_id = row
+            require_client_access(client_id, user)
+
+            cursor.execute("""
+                UPDATE email_logs 
+                SET status = 'pending', summary = 'Re-queued for execution by operator' 
+                WHERE id = %s
+            """, (email_log_id,))
+            db.commit()
+
+    import time
+    task_payload = {
+        "client_id": client_id,
+        "from_email": from_email,
+        "subject": subject or "",
+        "body": body or "",
+        "body_html": body_html,
+        "message_id": message_id,
+        "in_reply_to": in_reply_to,
+        "thread_id": thread_id,
+        "__retry_log_id__": email_log_id,
+        "__requeued_at__": int(time.time())
+    }
+    task = process_email_task.delay(task_payload)
+    logger.info(f"🔁 [DLQ Retry] Re-queued email_logs #{email_log_id} as task {task.id}")
+    return {
+        "status": "requeued",
+        "task_id": task.id,
+        "email_log_id": email_log_id,
+        "message": f"Email #{email_log_id} successfully re-queued into the pipeline."
+    }
+

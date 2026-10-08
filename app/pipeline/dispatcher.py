@@ -143,20 +143,44 @@ def create_ticket_and_reply(
     def _insert_ticket_record(cur):
         cur.execute("SELECT COUNT(*) FROM ticket_record WHERE ticket_id = %s", (outgoing_ticket_id,))
         if cur.fetchone()[0] == 0:
-            cur.execute("""
-                INSERT INTO ticket_record (ticket_id, client_id, mail_id, subject, body, status, sentiment, priority)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            """, (
-                outgoing_ticket_id,
-                client_id,
-                data.get("mail_id") or data.get("message_id") or f"msg-{outgoing_ticket_id}",
-                data["subject"],
-                data["body"],
-                "Ticket_Generated",
-                sentiment,
-                priority
-            ))
-            logger.info(f"✅ Ticket saved to ticket_record: {outgoing_ticket_id}")
+            rec_intent = data.get("intent") or "general_support"
+            rec_reason = data.get("escalation_reason") or "kb_miss"
+            rec_thread = data.get("thread_id") or None
+            rec_turns = int(data.get("troubleshooting_step") or 1)
+            try:
+                cur.execute("""
+                    INSERT INTO ticket_record (ticket_id, client_id, mail_id, subject, body, status, sentiment, priority, intent, escalation_reason, thread_id, turns_to_escalate)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    outgoing_ticket_id,
+                    client_id,
+                    data.get("mail_id") or data.get("message_id") or f"msg-{outgoing_ticket_id}",
+                    data["subject"],
+                    data["body"],
+                    "Ticket_Generated",
+                    sentiment,
+                    priority,
+                    rec_intent,
+                    rec_reason,
+                    rec_thread,
+                    rec_turns
+                ))
+            except Exception:
+                # Fallback for backward compatibility
+                cur.execute("""
+                    INSERT INTO ticket_record (ticket_id, client_id, mail_id, subject, body, status, sentiment, priority)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    outgoing_ticket_id,
+                    client_id,
+                    data.get("mail_id") or data.get("message_id") or f"msg-{outgoing_ticket_id}",
+                    data["subject"],
+                    data["body"],
+                    "Ticket_Generated",
+                    sentiment,
+                    priority
+                ))
+            logger.info(f"✅ Ticket saved to ticket_record: {outgoing_ticket_id} (reason: {rec_reason}, turns: {rec_turns})")
 
     try:
         if cursor is not None:

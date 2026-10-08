@@ -9,7 +9,7 @@ from typing import Dict, Any, Optional, Tuple
 
 from worker.celery_worker import celery
 from app.db import get_db_ctx
-from app.llm import current_client_id, extract_ticket_and_order_ids, generate_summary_llm
+from app.llm import current_client_id, current_thread_id, extract_ticket_and_order_ids, generate_summary_llm
 from app.text_cleaning import strip_quoted_reply, strip_disclaimers, extract_clean_text_from_html, is_html_content
 from app.email_disclaimers import get_active_disclaimer_texts
 from app.mailer import send_email
@@ -35,22 +35,40 @@ def generate_ticket_id() -> str:
 def resolve_thread_id(client_id: str, from_email: str, subject: str, in_reply_to: str = "", references: str = "", cursor=None) -> tuple[str, int]:
     """
     Resolves or initiates a conversation thread and returns (thread_id, prior_step).
+    Respects client inactivity_timeout_hours (default: 72h) - if previous interaction
+    exceeds timeout, a fresh thread_id is initiated to keep past closed metrics clean.
     1. Matches via in_reply_to against message_id in email_logs.
     2. Matches via references against message_id.
-    3. Fallback: Matches same sender + normalized subject within 7 days on active threads.
+    3. Fallback: Matches same sender + normalized subject within timeout window on active threads.
     4. Default: Generates new thread_id 'th_' + uuid4().hex[:12].
     """
     def _do_lookup(cur):
+        timeout_hours = 72
+        try:
+            cur.execute("SELECT inactivity_timeout_hours FROM email_accounts WHERE client_id = %s LIMIT 1", (client_id,))
+            acc_row = cur.fetchone()
+            if acc_row and acc_row[0] is not None:
+                timeout_hours = max(1, int(acc_row[0]))
+        except Exception:
+            pass
+
         # 1. Match via in_reply_to
         if in_reply_to and in_reply_to.strip():
             cur.execute("""
-                SELECT thread_id, troubleshooting_step 
+                SELECT thread_id, troubleshooting_step, created_at 
                 FROM email_logs 
                 WHERE client_id = %s AND message_id = %s AND thread_id IS NOT NULL 
                 ORDER BY id DESC LIMIT 1
             """, (client_id, in_reply_to.strip()))
             row = cur.fetchone()
             if row and row[0]:
+                created_at = row[2] if len(row) > 2 else None
+                if created_at:
+                    cur.execute("SELECT TIMESTAMPDIFF(HOUR, %s, NOW())", (created_at,))
+                    diff = cur.fetchone()
+                    if diff and diff[0] is not None and diff[0] > timeout_hours:
+                        logger.info(f"⏳ Thread {row[0]} timed out ({diff[0]}h > {timeout_hours}h) — initiating new thread")
+                        return None, 0
                 return row[0], int(row[1] or 0)
 
         # 2. Match via references
@@ -58,16 +76,23 @@ def resolve_thread_id(client_id: str, from_email: str, subject: str, in_reply_to
             ref_tokens = re.findall(r'<[^>]+>', references)
             for ref in ref_tokens:
                 cur.execute("""
-                    SELECT thread_id, troubleshooting_step 
+                    SELECT thread_id, troubleshooting_step, created_at 
                     FROM email_logs 
                     WHERE client_id = %s AND message_id = %s AND thread_id IS NOT NULL 
                     ORDER BY id DESC LIMIT 1
                 """, (client_id, ref))
                 row = cur.fetchone()
                 if row and row[0]:
+                    created_at = row[2] if len(row) > 2 else None
+                    if created_at:
+                        cur.execute("SELECT TIMESTAMPDIFF(HOUR, %s, NOW())", (created_at,))
+                        diff = cur.fetchone()
+                        if diff and diff[0] is not None and diff[0] > timeout_hours:
+                            logger.info(f"⏳ Thread {row[0]} timed out ({diff[0]}h > {timeout_hours}h) — initiating new thread")
+                            return None, 0
                     return row[0], int(row[1] or 0)
 
-        # 3. Subject-based thread matching within 7 days
+        # 3. Subject-based thread matching within inactivity timeout window
         # Only apply if the incoming email is an explicit reply/forward (e.g. Re: / Fwd:)
         # and has a descriptive, non-generic subject. Freshly composed emails must start a new thread.
         is_reply_subject = bool(re.match(r'^(re|fwd|fw):\s*', subject or '', flags=re.IGNORECASE))
@@ -83,11 +108,11 @@ def resolve_thread_id(client_id: str, from_email: str, subject: str, in_reply_to
                 FROM email_logs 
                 WHERE client_id = %s AND from_email = %s 
                   AND subject LIKE %s
-                  AND created_at >= NOW() - INTERVAL 7 DAY
+                  AND created_at >= NOW() - INTERVAL %s HOUR
                   AND is_resolved = 0
                   AND thread_id IS NOT NULL
                 ORDER BY id DESC LIMIT 1
-            """, (client_id, from_email, f"%{clean_subj[:50]}%"))
+            """, (client_id, from_email, f"%{clean_subj[:50]}%", timeout_hours))
             row = cur.fetchone()
             if row and row[0]:
                 return row[0], int(row[1] or 0)
@@ -243,34 +268,88 @@ def _finalize_task_and_log(ctx: PipelineContext, task_id: str, cursor=None, db=N
     6. Publishes real-time notification to Redis.
     """
     def _execute_persistence(cur, conn):
-        cur.execute("""
-            INSERT INTO email_logs (
-                client_id, from_email, subject, body, body_html, reply, score,
-                status, rag_id, sentiment, priority, execution_steps, summary,
-                message_id, in_reply_to, thread_id, troubleshooting_step, is_resolved
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """, (
-            ctx.client_id,
-            ctx.from_email,
-            ctx.subject,
-            ctx.body,
-            ctx.body_html or None,
-            ctx.draft_reply,
-            ctx.score,
-            ctx.status,
-            ctx.rag_id,
-            ctx.sentiment,
-            ctx.priority,
-            json.dumps(ctx.execution_steps),
-            ctx.summary or "",
-            ctx.message_id or None,
-            ctx.in_reply_to or None,
-            ctx.thread_id or None,
-            ctx.troubleshooting_step or 0,
-            1 if ctx.is_resolved else 0
-        ))
-        log_id = cur.lastrowid
+        is_closed = 1 if (ctx.is_resolved or ctx.status in ('ticket_created_and_sent', 'ticket_created_draft_pending') or ctx.conversation_closed) else 0
+        if getattr(ctx, "retry_log_id", None):
+            cur.execute("""
+                UPDATE email_logs SET
+                    client_id = %s, from_email = %s, subject = %s, body = %s, body_html = %s, reply = %s, score = %s,
+                    status = %s, rag_id = %s, sentiment = %s, priority = %s, execution_steps = %s, summary = %s,
+                    message_id = %s, in_reply_to = %s, thread_id = %s, troubleshooting_step = %s, is_resolved = %s,
+                    intent = %s, escalation_reason = %s, conversation_closed = %s,
+                    created_at = NOW()
+                WHERE id = %s
+            """, (
+                ctx.client_id,
+                ctx.from_email,
+                ctx.subject,
+                ctx.body,
+                ctx.body_html or None,
+                ctx.draft_reply,
+                ctx.score,
+                ctx.status,
+                ctx.rag_id,
+                ctx.sentiment,
+                ctx.priority,
+                json.dumps(ctx.execution_steps),
+                ctx.summary or "",
+                ctx.message_id or None,
+                ctx.in_reply_to or None,
+                ctx.thread_id or None,
+                ctx.troubleshooting_step or 0,
+                1 if ctx.is_resolved else 0,
+                ctx.intent or "general_support",
+                ctx.escalation_reason,
+                is_closed,
+                ctx.retry_log_id
+            ))
+            log_id = ctx.retry_log_id
+        else:
+            cur.execute("""
+                INSERT INTO email_logs (
+                    client_id, from_email, subject, body, body_html, reply, score,
+                    status, rag_id, sentiment, priority, execution_steps, summary,
+                    message_id, in_reply_to, thread_id, troubleshooting_step, is_resolved,
+                    intent, escalation_reason, conversation_closed
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                ctx.client_id,
+                ctx.from_email,
+                ctx.subject,
+                ctx.body,
+                ctx.body_html or None,
+                ctx.draft_reply,
+                ctx.score,
+                ctx.status,
+                ctx.rag_id,
+                ctx.sentiment,
+                ctx.priority,
+                json.dumps(ctx.execution_steps),
+                ctx.summary or "",
+                ctx.message_id or None,
+                ctx.in_reply_to or None,
+                ctx.thread_id or None,
+                ctx.troubleshooting_step or 0,
+                1 if ctx.is_resolved else 0,
+                ctx.intent or "general_support",
+                ctx.escalation_reason,
+                is_closed
+            ))
+            log_id = cur.lastrowid
+
+        # Discrete backfill of email_log_id onto llm_logs for this thread
+        if ctx.thread_id and log_id:
+            try:
+                cur.execute("""
+                    UPDATE llm_logs 
+                    SET email_log_id = %s 
+                    WHERE client_id = %s 
+                      AND thread_id = %s 
+                      AND email_log_id IS NULL 
+                      AND created_at >= NOW() - INTERVAL 2 MINUTE
+                """, (log_id, ctx.client_id, ctx.thread_id))
+            except Exception as bf_err:
+                logger.warning(f"⚠️ llm_logs backfill failed: {bf_err}")
 
         # Auto-populate Pending Review in draft_emails if manual review is required
         if ctx.status == "pending_manual_review":
@@ -348,6 +427,7 @@ def process_email_task(self, data: Dict[str, Any]):
 
     # Set context token for tenant isolation
     ctx_token = current_client_id.set(client_id)
+    token_thread = None
     ctx = PipelineContext.from_task_data(task_id, data)
 
     try:
@@ -395,6 +475,9 @@ def process_email_task(self, data: Dict[str, Any]):
                 if apply_deterministic_filters(ctx, cursor):
                     _finalize_task_and_log(ctx, task_id=task_id, cursor=cursor, db=db)
                     return
+
+        # Bind thread context for all subsequent LLM telemetry logging
+        token_thread = current_thread_id.set(ctx.thread_id or "")
 
         # ====================================================================
         # Phase B: Network, AI & Tools Execution (ZERO DB connection held)
@@ -448,8 +531,21 @@ def process_email_task(self, data: Dict[str, Any]):
         if ticket_ids:
             ctx.ticket_id = ticket_ids[0]
 
-        # Load Conversation History from Redis (with SQL fallback)
+        # Route Intent & Entities via classification
+        try:
+            from app.pipeline.router import route_intent_and_entities
+            route_intent_and_entities(ctx, email_query)
+        except Exception as route_err:
+            logger.warning(f"⚠️ Intent routing failed, using defaults: {route_err}")
+            ctx.intent = "general_support"
+
+        # Load Conversation History from Redis (with SQL fallback and prior thread carryover)
         ctx.history = get_history(client_id, ctx.from_email, last_n=10, thread_id=ctx.thread_id)
+        if not ctx.history:
+            prior_history = get_history(client_id, ctx.from_email, last_n=3)
+            if prior_history:
+                logger.info(f"📜 Carried over {len(prior_history)} background context messages from expired thread for {ctx.from_email}")
+                ctx.history = prior_history
         logger.info(f"📜 Loaded {len(ctx.history)} history messages (thread={ctx.thread_id}, step={ctx.troubleshooting_step})")
 
         # Autonomous Support Agent Loop (No DB held across 10-30s LLM / Tool execution)
@@ -547,6 +643,18 @@ def process_email_task(self, data: Dict[str, Any]):
                             error_summary
                         ))
                         db.commit()
+
+                try:
+                    from app.alert_service import trigger_alert_if_needed
+                    trigger_alert_if_needed(
+                        client_id, "dlq_poison",
+                        f"Task Poison Pill Dropped",
+                        f"Task {task_id} from {from_email} exceeded retries and entered DLQ failure status.",
+                        {"Task ID": task_id, "Sender": from_email, "Error": str(e)[:150]}
+                    )
+                except Exception as al_err:
+                    logger.warning(f"⚠️ Failed to trigger DLQ webhook: {al_err}")
+
             except Exception as log_err:
                 logger.error(f"⚠️ Failed to write fatal task error to DB: {log_err}")
             return {"status": "fatal_processing_error", "error": str(e)}
@@ -557,6 +665,11 @@ def process_email_task(self, data: Dict[str, Any]):
             current_client_id.reset(ctx_token)
         except Exception:
             pass
+        if token_thread is not None:
+            try:
+                current_thread_id.reset(token_thread)
+            except Exception:
+                pass
         publish_email_update(client_id)
 
 

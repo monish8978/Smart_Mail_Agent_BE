@@ -452,6 +452,29 @@ def execute_tool_call(
             if ctx.subject.lower() in ("support request", "(no subject)", "no subject") and issue_summary:
                 task_data["subject"] = issue_summary[:100]
 
+            # Infer structured technical failure cause
+            reason = arguments.get("escalation_reason")
+            if not reason:
+                body_lower = (ctx.body or "").lower()
+                subj_lower = (ctx.subject or "").lower()
+                combined = f"{subj_lower} {body_lower}"
+                if any(w in combined for w in ["human", "agent", "representative", "person", "speak with someone", "manager"]):
+                    reason = "customer_requested_human"
+                elif any(w in combined for w in ["refund", "cancel subscription", "billing dispute", "chargeback"]):
+                    reason = "policy_human_required"
+                elif ctx.troubleshooting_step >= 3:
+                    reason = "max_turns_exceeded"
+                elif "CRM_Status_Lookup_Error" in ctx.execution_steps or "lookup_failed" in (ctx.context_data or {}).get("status", ""):
+                    reason = "connector_api_error"
+                elif "Knowledge_Search_Empty" in ctx.execution_steps:
+                    reason = "kb_miss"
+                elif ctx.score and ctx.score < 75:
+                    reason = "low_confidence"
+                else:
+                    reason = "kb_miss"
+            ctx.escalation_reason = reason
+            task_data["escalation_reason"] = reason
+
             reply, ticket_id, status = create_ticket_and_reply(
                 data=task_data,
                 client_id=ctx.client_id,
