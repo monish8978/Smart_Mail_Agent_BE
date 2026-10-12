@@ -45,11 +45,32 @@ def ensure_draft_emails_table(cursor=None):
     """
     if cursor:
         cursor.execute(create_sql)
+        _ensure_thread_id_column(cursor)
     else:
         with get_db_ctx() as conn:
             with conn.cursor() as cur:
                 cur.execute(create_sql)
+                _ensure_thread_id_column(cur)
             conn.commit()
+
+
+def _ensure_thread_id_column(cur):
+    try:
+        cur.execute("SELECT thread_id FROM draft_emails LIMIT 1")
+    except Exception:
+        try:
+            cur.execute("ALTER TABLE draft_emails ADD COLUMN thread_id VARCHAR(255) DEFAULT NULL AFTER message_id, ADD INDEX idx_thread_id (thread_id)")
+        except Exception as e:
+            logger.warning(f"Could not add thread_id column to draft_emails: {e}")
+    try:
+        cur.execute("""
+            UPDATE draft_emails d
+            JOIN email_logs e ON d.email_log_id = e.id
+            SET d.thread_id = e.thread_id
+            WHERE d.thread_id IS NULL AND e.thread_id IS NOT NULL
+        """)
+    except Exception:
+        pass
 
 
 def create_draft(
@@ -68,6 +89,7 @@ def create_draft(
     message_id: Optional[str] = None,
     sender_name: Optional[str] = None,
     email_log_id: Optional[int] = None,
+    thread_id: Optional[str] = None,
 ) -> int:
     """
     Inserts a newly generated AI reply into draft_emails with pending status.
@@ -79,17 +101,17 @@ def create_draft(
             INSERT INTO draft_emails (
                 client_id, email_log_id, from_email, sender_name, to_email,
                 subject, original_body, draft_reply, confidence_score,
-                intent, sentiment, priority, ticket_id, in_reply_to, message_id, status
+                intent, sentiment, priority, ticket_id, in_reply_to, message_id, thread_id, status
             ) VALUES (
                 %s, %s, %s, %s, %s,
                 %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, 'pending'
+                %s, %s, %s, %s, %s, %s, %s, 'pending'
             )
             """
             cur.execute(sql, (
                 client_id, email_log_id, from_email, sender_name, to_email,
                 subject, original_body, draft_reply, confidence_score,
-                intent, sentiment, priority, ticket_id, in_reply_to, message_id
+                intent, sentiment, priority, ticket_id, in_reply_to, message_id, thread_id
             ))
             draft_id = cur.lastrowid
         conn.commit()
@@ -119,45 +141,56 @@ def list_drafts(
     params = []
 
     if client_id and client_id != "ALL":
-        conditions.append("client_id = %s")
+        conditions.append("d.client_id = %s")
         params.append(client_id)
 
     if status and status != "ALL":
-        conditions.append("status = %s")
+        conditions.append("d.status = %s")
         params.append(status)
 
     if from_email:
-        conditions.append("from_email LIKE %s")
+        conditions.append("d.from_email LIKE %s")
         params.append(f"%{from_email.strip()}%")
 
     if intent and intent != "ALL":
-        conditions.append("intent = %s")
+        conditions.append("d.intent = %s")
         params.append(intent)
 
     if sentiment and sentiment != "ALL":
-        conditions.append("sentiment = %s")
+        conditions.append("d.sentiment = %s")
         params.append(sentiment)
 
     if min_score is not None:
-        conditions.append("confidence_score >= %s")
+        conditions.append("d.confidence_score >= %s")
         params.append(min_score)
 
     if max_score is not None:
-        conditions.append("confidence_score <= %s")
+        conditions.append("d.confidence_score <= %s")
         params.append(max_score)
 
     if date_from:
-        conditions.append("created_at >= %s")
+        conditions.append("d.created_at >= %s")
         params.append(date_from)
 
     if date_to:
-        conditions.append("created_at <= %s")
+        conditions.append("d.created_at <= %s")
         params.append(date_to)
 
     if search:
-        search_term = f"%{search.strip()}%"
-        conditions.append("(subject LIKE %s OR original_body LIKE %s OR draft_reply LIKE %s OR from_email LIKE %s OR sender_name LIKE %s)")
-        params.extend([search_term, search_term, search_term, search_term, search_term])
+        search_clean = search.strip()
+        search_term = f"%{search_clean}%"
+        num_clean = search_clean.lstrip("#") if search_clean.startswith("#") else (search_clean if search_clean.isdigit() else None)
+
+        if num_clean and num_clean.isdigit():
+            conditions.append(
+                "(d.id = %s OR d.email_log_id = %s OR d.subject LIKE %s OR d.original_body LIKE %s OR d.draft_reply LIKE %s OR d.from_email LIKE %s OR d.sender_name LIKE %s OR d.ticket_id LIKE %s OR COALESCE(d.thread_id, e.thread_id) LIKE %s)"
+            )
+            params.extend([int(num_clean), int(num_clean), search_term, search_term, search_term, search_term, search_term, search_term, search_term])
+        else:
+            conditions.append(
+                "(d.subject LIKE %s OR d.original_body LIKE %s OR d.draft_reply LIKE %s OR d.from_email LIKE %s OR d.sender_name LIKE %s OR d.ticket_id LIKE %s OR COALESCE(d.thread_id, e.thread_id) LIKE %s OR CAST(d.id AS CHAR) LIKE %s OR CAST(d.email_log_id AS CHAR) LIKE %s)"
+            )
+            params.extend([search_term, search_term, search_term, search_term, search_term, search_term, search_term, search_term, search_term])
 
     where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
 
@@ -166,19 +199,21 @@ def list_drafts(
     with get_db_ctx() as conn:
         with conn.cursor() as cur:
             # Get total count
-            count_sql = f"SELECT COUNT(*) FROM draft_emails{where_clause}"
+            count_sql = f"SELECT COUNT(*) FROM draft_emails d LEFT JOIN email_logs e ON d.email_log_id = e.id{where_clause}"
             cur.execute(count_sql, tuple(params))
             total_count = cur.fetchone()[0]
 
             # Get items
             query_sql = f"""
-            SELECT id, client_id, email_log_id, from_email, sender_name, to_email,
-                   subject, original_body, draft_reply, confidence_score,
-                   intent, sentiment, priority, ticket_id, in_reply_to, message_id,
-                   status, rejection_reason, reviewed_by, reviewed_at, sent_at, created_at
-            FROM draft_emails
+            SELECT d.id, d.client_id, d.email_log_id, d.from_email, d.sender_name, d.to_email,
+                   d.subject, d.original_body, d.draft_reply, d.confidence_score,
+                   d.intent, d.sentiment, d.priority, d.ticket_id, d.in_reply_to, d.message_id,
+                   d.status, d.rejection_reason, d.reviewed_by, d.reviewed_at, d.sent_at, d.created_at,
+                   COALESCE(d.thread_id, e.thread_id) AS thread_id
+            FROM draft_emails d
+            LEFT JOIN email_logs e ON d.email_log_id = e.id
             {where_clause}
-            ORDER BY created_at DESC
+            ORDER BY d.created_at DESC
             LIMIT %s OFFSET %s
             """
             item_params = list(params) + [page_size, offset]
@@ -186,13 +221,14 @@ def list_drafts(
             rows = cur.fetchall()
 
             # Format items
-            items = []
             columns = [
                 "id", "client_id", "email_log_id", "from_email", "sender_name", "to_email",
                 "subject", "original_body", "draft_reply", "confidence_score",
                 "intent", "sentiment", "priority", "ticket_id", "in_reply_to", "message_id",
-                "status", "rejection_reason", "reviewed_by", "reviewed_at", "sent_at", "created_at"
+                "status", "rejection_reason", "reviewed_by", "reviewed_at", "sent_at", "created_at",
+                "thread_id"
             ]
+            items = []
             for row in rows:
                 item = dict(zip(columns, row))
                 # Convert timestamps to isoformat strings
@@ -217,16 +253,34 @@ def get_draft(draft_id: int, client_id: Optional[str] = None) -> Optional[Dict[s
     ensure_draft_emails_table()
     with get_db_ctx() as conn:
         with conn.cursor() as cur:
+            sql = """
+            SELECT d.id, d.client_id, d.email_log_id, d.from_email, d.sender_name, d.to_email,
+                   d.subject, d.original_body, d.draft_reply, d.confidence_score,
+                   d.intent, d.sentiment, d.priority, d.ticket_id, d.in_reply_to, d.message_id,
+                   d.status, d.rejection_reason, d.reviewed_by, d.reviewed_at, d.sent_at, d.created_at,
+                   COALESCE(d.thread_id, e.thread_id) AS thread_id
+            FROM draft_emails d
+            LEFT JOIN email_logs e ON d.email_log_id = e.id
+            WHERE d.id = %s
+            """
+            params = [draft_id]
             if client_id and client_id != "ALL":
-                cur.execute("SELECT * FROM draft_emails WHERE id = %s AND client_id = %s LIMIT 1", (draft_id, client_id))
-            else:
-                cur.execute("SELECT * FROM draft_emails WHERE id = %s LIMIT 1", (draft_id,))
+                sql += " AND d.client_id = %s"
+                params.append(client_id)
+            sql += " LIMIT 1"
+
+            cur.execute(sql, tuple(params))
             row = cur.fetchone()
             if not row:
                 return None
             
-            # Get column names
-            columns = [col[0] for col in cur.description]
+            columns = [
+                "id", "client_id", "email_log_id", "from_email", "sender_name", "to_email",
+                "subject", "original_body", "draft_reply", "confidence_score",
+                "intent", "sentiment", "priority", "ticket_id", "in_reply_to", "message_id",
+                "status", "rejection_reason", "reviewed_by", "reviewed_at", "sent_at", "created_at",
+                "thread_id"
+            ]
             item = dict(zip(columns, row))
             for time_col in ["reviewed_at", "sent_at", "created_at"]:
                 if item.get(time_col):

@@ -194,21 +194,6 @@ def get_dashboard_stats_endpoint(
             }
         }
 
-        date_filter = ""
-        date_params = []
-
-        if range_type == "today":
-            date_filter = " AND DATE(created_at) = CURDATE()"
-        elif range_type == "yesterday":
-            date_filter = " AND DATE(created_at) = DATE_SUB(CURDATE(), INTERVAL 1 DAY)"
-        elif range_type == "this_month":
-            date_filter = " AND MONTH(created_at) = MONTH(CURDATE()) AND YEAR(created_at) = YEAR(CURDATE())"
-        elif range_type == "last_month":
-            date_filter = " AND MONTH(created_at) = MONTH(DATE_SUB(CURDATE(), INTERVAL 1 MONTH)) AND YEAR(created_at) = YEAR(DATE_SUB(CURDATE(), INTERVAL 1 MONTH))"
-        elif range_type == "custom" and start_date and end_date:
-            date_filter = " AND DATE(created_at) BETWEEN %s AND %s"
-            date_params = [start_date, end_date]
-
         with get_db_ctx() as db:
             with db.cursor() as cursor:
                 col = "client_id"
@@ -228,6 +213,47 @@ def get_dashboard_stats_endpoint(
                         acct_col = "user_id"
                 except Exception as ex:
                     logger.warning(f"⚠️ Could not describe email_accounts: {ex}")
+
+                # Load configured week_start_day ('monday' or 'sunday') when filtering by week
+                week_start_day = "monday"
+                if range_type in ("this_week", "last_week", "week"):
+                    try:
+                        if client_id != "ALL":
+                            cursor.execute(f"SELECT week_start_day FROM email_accounts WHERE {acct_col} = %s LIMIT 1", (client_id,))
+                            w_row = cursor.fetchone()
+                            if w_row and w_row[0]:
+                                week_start_day = str(w_row[0]).strip().lower()
+                        else:
+                            cursor.execute("SELECT week_start_day FROM email_accounts WHERE week_start_day IS NOT NULL LIMIT 1")
+                            w_row = cursor.fetchone()
+                            if w_row and w_row[0]:
+                                week_start_day = str(w_row[0]).strip().lower()
+                    except Exception as w_err:
+                        logger.warning(f"⚠️ Could not fetch week_start_day: {w_err}")
+
+                # MySQL YEARWEEK mode: 1 = Monday-Sunday, 0 = Sunday-Saturday
+                yearweek_mode = 0 if week_start_day == "sunday" else 1
+
+                date_filter = ""
+                date_params = []
+
+                if range_type == "today":
+                    date_filter = " AND DATE(created_at) = CURDATE()"
+                elif range_type == "yesterday":
+                    date_filter = " AND DATE(created_at) = DATE_SUB(CURDATE(), INTERVAL 1 DAY)"
+                elif range_type in ("this_week", "week"):
+                    date_filter = f" AND YEARWEEK(created_at, {yearweek_mode}) = YEARWEEK(CURDATE(), {yearweek_mode})"
+                elif range_type == "last_week":
+                    date_filter = f" AND YEARWEEK(created_at, {yearweek_mode}) = YEARWEEK(DATE_SUB(CURDATE(), INTERVAL 7 DAY), {yearweek_mode})"
+                elif range_type in ("last_7_days", "7_days"):
+                    date_filter = " AND DATE(created_at) >= DATE_SUB(CURDATE(), INTERVAL 6 DAY)"
+                elif range_type == "this_month":
+                    date_filter = " AND MONTH(created_at) = MONTH(CURDATE()) AND YEAR(created_at) = YEAR(CURDATE())"
+                elif range_type == "last_month":
+                    date_filter = " AND MONTH(created_at) = MONTH(DATE_SUB(CURDATE(), INTERVAL 1 MONTH)) AND YEAR(created_at) = YEAR(DATE_SUB(CURDATE(), INTERVAL 1 MONTH))"
+                elif range_type == "custom" and start_date and end_date:
+                    date_filter = " AND DATE(created_at) BETWEEN %s AND %s"
+                    date_params = [start_date, end_date]
 
                 # 1. Total Emails
                 if client_id == "ALL":
@@ -312,7 +338,7 @@ def get_dashboard_stats_endpoint(
                             SUM(CASE WHEN e.score < 60 AND e.score IS NOT NULL THEN 1 ELSE 0 END) as low_floor
                         FROM email_logs e
                         LEFT JOIN email_accounts a ON e.{col} = a.{acct_col}
-                        WHERE 1=1 {date_filter}
+                        WHERE 1=1 {date_filter.replace('created_at', 'e.created_at')}
                     """, tuple(date_params))
                 else:
                     cursor.execute(f"""
@@ -366,7 +392,7 @@ def get_dashboard_stats_endpoint(
                                 ROUND(AVG(e.score), 1) as avg_score
                             FROM email_logs e
                             LEFT JOIN email_accounts a ON e.{col} = a.{acct_col}
-                            WHERE 1=1 {date_filter}
+                            WHERE 1=1 {date_filter.replace('created_at', 'e.created_at')}
                             GROUP BY cid
                             ORDER BY total_emails DESC
                             LIMIT 10
@@ -401,6 +427,18 @@ def get_dashboard_stats_endpoint(
                     group_by_format = "%%H:00"
                     group_by_name = "%%h %%p"
                     chart_interval = "DATE(created_at) = DATE_SUB(CURDATE(), INTERVAL 1 DAY)"
+                elif range_type in ("this_week", "week"):
+                    group_by_format = "%%Y-%%m-%%d"
+                    group_by_name = "%%b %%d"
+                    chart_interval = f"YEARWEEK(created_at, {yearweek_mode}) = YEARWEEK(CURDATE(), {yearweek_mode})"
+                elif range_type == "last_week":
+                    group_by_format = "%%Y-%%m-%%d"
+                    group_by_name = "%%b %%d"
+                    chart_interval = f"YEARWEEK(created_at, {yearweek_mode}) = YEARWEEK(DATE_SUB(CURDATE(), INTERVAL 7 DAY), {yearweek_mode})"
+                elif range_type in ("last_7_days", "7_days"):
+                    group_by_format = "%%Y-%%m-%%d"
+                    group_by_name = "%%b %%d"
+                    chart_interval = "DATE(created_at) >= DATE_SUB(CURDATE(), INTERVAL 6 DAY)"
                 elif range_type == "this_month":
                     group_by_format = "%%Y-%%m-%%d"
                     group_by_name = "%%b %%d"
@@ -850,6 +888,12 @@ def get_dashboard_stats_endpoint(
                     prior_interval = "DATE(created_at) = DATE_SUB(CURDATE(), INTERVAL 1 DAY)"
                 elif range_type == "yesterday":
                     prior_interval = "DATE(created_at) = DATE_SUB(CURDATE(), INTERVAL 2 DAY)"
+                elif range_type in ("this_week", "week"):
+                    prior_interval = f"YEARWEEK(created_at, {yearweek_mode}) = YEARWEEK(DATE_SUB(CURDATE(), INTERVAL 7 DAY), {yearweek_mode})"
+                elif range_type == "last_week":
+                    prior_interval = f"YEARWEEK(created_at, {yearweek_mode}) = YEARWEEK(DATE_SUB(CURDATE(), INTERVAL 14 DAY), {yearweek_mode})"
+                elif range_type in ("last_7_days", "7_days"):
+                    prior_interval = "DATE(created_at) BETWEEN DATE_SUB(CURDATE(), INTERVAL 13 DAY) AND DATE_SUB(CURDATE(), INTERVAL 7 DAY)"
                 elif range_type == "this_month":
                     prior_interval = "MONTH(created_at) = MONTH(DATE_SUB(CURDATE(), INTERVAL 1 MONTH)) AND YEAR(created_at) = YEAR(DATE_SUB(CURDATE(), INTERVAL 1 MONTH))"
                 elif range_type == "last_month":
@@ -993,22 +1037,74 @@ def get_dashboard_stats_endpoint(
 
 @router.get("/llm/metrics/{client_id}")
 @router.get("/llm-metrics/{client_id}")
-def get_llm_metrics_endpoint(client_id: str, time_window: str = "all", user: dict = Depends(get_current_user)):
+def get_llm_metrics_endpoint(
+    client_id: str, 
+    time_window: str = "all", 
+    range_type: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    user: dict = Depends(get_current_user)
+):
     require_client_access(client_id, user)
     try:
         ensure_llm_logs_table()
 
-        # Build dynamic time window filter
-        time_filter = ""
-        if time_window == "24h":
-            time_filter = " AND l.created_at >= NOW() - INTERVAL 24 HOUR"
-        elif time_window == "7d":
-            time_filter = " AND l.created_at >= NOW() - INTERVAL 7 DAY"
-        elif time_window == "30d":
-            time_filter = " AND l.created_at >= NOW() - INTERVAL 30 DAY"
+        effective_range = range_type or time_window or "all"
 
         with get_db_ctx() as db:
             with db.cursor() as cursor:
+                is_admin = (user.get("role") == "admin")
+
+                # Load configured week_start_day ('monday' or 'sunday') when filtering by week
+                week_start_day = "monday"
+                if effective_range in ("this_week", "last_week", "week"):
+                    try:
+                        acct_col = "client_id"
+                        cursor.execute("DESCRIBE email_accounts")
+                        cols = [r[0] for r in cursor.fetchall()]
+                        if "client_id" not in cols and "user_id" in cols:
+                            acct_col = "user_id"
+
+                        if client_id != "ALL":
+                            cursor.execute(f"SELECT week_start_day FROM email_accounts WHERE {acct_col} = %s LIMIT 1", (client_id,))
+                            w_row = cursor.fetchone()
+                            if w_row and w_row[0]:
+                                week_start_day = str(w_row[0]).strip().lower()
+                        else:
+                            cursor.execute("SELECT week_start_day FROM email_accounts WHERE week_start_day IS NOT NULL LIMIT 1")
+                            w_row = cursor.fetchone()
+                            if w_row and w_row[0]:
+                                week_start_day = str(w_row[0]).strip().lower()
+                    except Exception as w_err:
+                        logger.warning(f"⚠️ Could not fetch week_start_day: {w_err}")
+
+                # MySQL YEARWEEK mode: 1 = Monday-Sunday, 0 = Sunday-Saturday
+                yearweek_mode = 0 if week_start_day == "sunday" else 1
+
+                # Build dynamic time window filter
+                time_filter = ""
+                time_params: List[Any] = []
+                if effective_range in ("today", "24h"):
+                    time_filter = " AND DATE(l.created_at) = CURDATE()"
+                elif effective_range == "yesterday":
+                    time_filter = " AND DATE(l.created_at) = DATE_SUB(CURDATE(), INTERVAL 1 DAY)"
+                elif effective_range in ("this_week", "week"):
+                    time_filter = f" AND YEARWEEK(l.created_at, {yearweek_mode}) = YEARWEEK(CURDATE(), {yearweek_mode})"
+                elif effective_range == "last_week":
+                    time_filter = f" AND YEARWEEK(l.created_at, {yearweek_mode}) = YEARWEEK(DATE_SUB(CURDATE(), INTERVAL 7 DAY), {yearweek_mode})"
+                elif effective_range in ("last_7_days", "7d", "7_days"):
+                    time_filter = " AND DATE(l.created_at) >= DATE_SUB(CURDATE(), INTERVAL 6 DAY)"
+                elif effective_range in ("this_month", "30d"):
+                    time_filter = " AND MONTH(l.created_at) = MONTH(CURDATE()) AND YEAR(l.created_at) = YEAR(CURDATE())"
+                elif effective_range == "last_month":
+                    time_filter = " AND MONTH(l.created_at) = MONTH(DATE_SUB(CURDATE(), INTERVAL 1 MONTH)) AND YEAR(l.created_at) = YEAR(DATE_SUB(CURDATE(), INTERVAL 1 MONTH))"
+                elif effective_range == "custom" and start_date and end_date:
+                    time_filter = " AND DATE(l.created_at) BETWEEN %s AND %s"
+                    time_params = [start_date, end_date]
+
+                base_filter_params = tuple(time_params)
+                client_filter_params = (client_id, *time_params)
+
                 # 1. Total statistics
                 if client_id == "ALL":
                     cursor.execute(f"""
@@ -1016,24 +1112,26 @@ def get_llm_metrics_endpoint(client_id: str, time_window: str = "all", user: dic
                             COUNT(l.id) as total_requests,
                             SUM(l.prompt_tokens) as total_prompt_tokens,
                             SUM(l.completion_tokens) as total_completion_tokens,
-                            SUM(l.cost * COALESCE(ea.cost_multiplier, 1.0)) as total_cost,
-                            AVG(l.latency_ms) as avg_latency
+                            SUM(COALESCE(l.billed_cost, l.cost * COALESCE(ea.cost_multiplier, 1.0))) as total_cost,
+                            AVG(l.latency_ms) as avg_latency,
+                            SUM(l.cost) as raw_cost
                         FROM llm_logs l
                         LEFT JOIN email_accounts ea ON l.client_id = ea.client_id
                         WHERE 1=1 {time_filter}
-                    """)
+                    """, base_filter_params)
                 else:
                     cursor.execute(f"""
                         SELECT 
                             COUNT(l.id) as total_requests,
                             SUM(l.prompt_tokens) as total_prompt_tokens,
                             SUM(l.completion_tokens) as total_completion_tokens,
-                            SUM(l.cost * COALESCE(ea.cost_multiplier, 1.0)) as total_cost,
-                            AVG(l.latency_ms) as avg_latency
+                            SUM(COALESCE(l.billed_cost, l.cost * COALESCE(ea.cost_multiplier, 1.0))) as total_cost,
+                            AVG(l.latency_ms) as avg_latency,
+                            SUM(l.cost) as raw_cost
                         FROM llm_logs l
                         LEFT JOIN email_accounts ea ON l.client_id = ea.client_id
                         WHERE l.client_id = %s {time_filter}
-                    """, (client_id,))
+                    """, client_filter_params)
                 total_row = cursor.fetchone()
 
                 totals = {
@@ -1042,8 +1140,13 @@ def get_llm_metrics_endpoint(client_id: str, time_window: str = "all", user: dic
                     "total_completion_tokens": int(total_row[2] or 0),
                     "total_cost": float(total_row[3] or 0.0),
                     "avg_latency": float(total_row[4] or 0.0),
-                    "time_window": time_window
+                    "time_window": effective_range,
+                    "range_type": effective_range,
+                    "week_start_day": week_start_day
                 }
+                if is_admin:
+                    totals["raw_cost"] = float(total_row[5] or 0.0)
+                    totals["margin"] = round(totals["total_cost"] - totals["raw_cost"], 5)
 
                 # 2. Breakdown by Provider
                 if client_id == "ALL":
@@ -1053,14 +1156,14 @@ def get_llm_metrics_endpoint(client_id: str, time_window: str = "all", user: dic
                             COUNT(l.id) as requests,
                             SUM(l.prompt_tokens) as prompt_tokens,
                             SUM(l.completion_tokens) as completion_tokens,
-                            SUM(l.cost * COALESCE(ea.cost_multiplier, 1.0)) as cost,
+                            SUM(COALESCE(l.billed_cost, l.cost * COALESCE(ea.cost_multiplier, 1.0))) as cost,
                             AVG(l.latency_ms) as avg_latency
                         FROM llm_logs l
                         LEFT JOIN email_accounts ea ON l.client_id = ea.client_id
                         WHERE 1=1 {time_filter}
                         GROUP BY COALESCE(NULLIF(l.provider, ''), 'groq')
                         ORDER BY cost DESC, requests DESC
-                    """)
+                    """, base_filter_params)
                 else:
                     cursor.execute(f"""
                         SELECT 
@@ -1068,14 +1171,14 @@ def get_llm_metrics_endpoint(client_id: str, time_window: str = "all", user: dic
                             COUNT(l.id) as requests,
                             SUM(l.prompt_tokens) as prompt_tokens,
                             SUM(l.completion_tokens) as completion_tokens,
-                            SUM(l.cost * COALESCE(ea.cost_multiplier, 1.0)) as cost,
+                            SUM(COALESCE(l.billed_cost, l.cost * COALESCE(ea.cost_multiplier, 1.0))) as cost,
                             AVG(l.latency_ms) as avg_latency
                         FROM llm_logs l
                         LEFT JOIN email_accounts ea ON l.client_id = ea.client_id
                         WHERE l.client_id = %s {time_filter}
                         GROUP BY COALESCE(NULLIF(l.provider, ''), 'groq')
                         ORDER BY cost DESC, requests DESC
-                    """, (client_id,))
+                    """, client_filter_params)
                 provider_rows = cursor.fetchall()
                 provider_breakdown = []
                 for row in provider_rows:
@@ -1096,13 +1199,13 @@ def get_llm_metrics_endpoint(client_id: str, time_window: str = "all", user: dic
                             COUNT(l.id) as requests,
                             SUM(l.prompt_tokens) as prompt_tokens,
                             SUM(l.completion_tokens) as completion_tokens,
-                            SUM(l.cost * COALESCE(ea.cost_multiplier, 1.0)) as cost,
+                            SUM(COALESCE(l.billed_cost, l.cost * COALESCE(ea.cost_multiplier, 1.0))) as cost,
                             AVG(l.latency_ms) as avg_latency
                         FROM llm_logs l
                         LEFT JOIN email_accounts ea ON l.client_id = ea.client_id
                         WHERE 1=1 {time_filter}
                         GROUP BY l.model_name
-                    """)
+                    """, base_filter_params)
                 else:
                     cursor.execute(f"""
                         SELECT 
@@ -1110,13 +1213,13 @@ def get_llm_metrics_endpoint(client_id: str, time_window: str = "all", user: dic
                             COUNT(l.id) as requests,
                             SUM(l.prompt_tokens) as prompt_tokens,
                             SUM(l.completion_tokens) as completion_tokens,
-                            SUM(l.cost * COALESCE(ea.cost_multiplier, 1.0)) as cost,
+                            SUM(COALESCE(l.billed_cost, l.cost * COALESCE(ea.cost_multiplier, 1.0))) as cost,
                             AVG(l.latency_ms) as avg_latency
                         FROM llm_logs l
                         LEFT JOIN email_accounts ea ON l.client_id = ea.client_id
                         WHERE l.client_id = %s {time_filter}
                         GROUP BY l.model_name
-                    """, (client_id,))
+                    """, client_filter_params)
                 model_rows = cursor.fetchall()
                 model_breakdown = []
                 for row in model_rows:
@@ -1137,13 +1240,13 @@ def get_llm_metrics_endpoint(client_id: str, time_window: str = "all", user: dic
                             COUNT(l.id) as requests,
                             SUM(l.prompt_tokens) as prompt_tokens,
                             SUM(l.completion_tokens) as completion_tokens,
-                            SUM(l.cost * COALESCE(ea.cost_multiplier, 1.0)) as cost,
+                            SUM(COALESCE(l.billed_cost, l.cost * COALESCE(ea.cost_multiplier, 1.0))) as cost,
                             AVG(l.latency_ms) as avg_latency
                         FROM llm_logs l
                         LEFT JOIN email_accounts ea ON l.client_id = ea.client_id
                         WHERE 1=1 {time_filter}
                         GROUP BY l.caller_function
-                    """)
+                    """, base_filter_params)
                 else:
                     cursor.execute(f"""
                         SELECT 
@@ -1151,13 +1254,13 @@ def get_llm_metrics_endpoint(client_id: str, time_window: str = "all", user: dic
                             COUNT(l.id) as requests,
                             SUM(l.prompt_tokens) as prompt_tokens,
                             SUM(l.completion_tokens) as completion_tokens,
-                            SUM(l.cost * COALESCE(ea.cost_multiplier, 1.0)) as cost,
+                            SUM(COALESCE(l.billed_cost, l.cost * COALESCE(ea.cost_multiplier, 1.0))) as cost,
                             AVG(l.latency_ms) as avg_latency
                         FROM llm_logs l
                         LEFT JOIN email_accounts ea ON l.client_id = ea.client_id
                         WHERE l.client_id = %s {time_filter}
                         GROUP BY l.caller_function
-                    """, (client_id,))
+                    """, client_filter_params)
                 caller_rows = cursor.fetchall()
                 caller_breakdown = []
                 for row in caller_rows:
@@ -1225,7 +1328,7 @@ def get_llm_metrics_endpoint(client_id: str, time_window: str = "all", user: dic
                         DATE(l.created_at) as log_date,
                         COUNT(l.id) as requests,
                         SUM(l.prompt_tokens + l.completion_tokens) as total_tokens,
-                        SUM(l.cost * COALESCE(ea.cost_multiplier, 1.0)) as daily_cost
+                        SUM(COALESCE(l.billed_cost, l.cost * COALESCE(ea.cost_multiplier, 1.0))) as daily_cost
                     FROM llm_logs l
                     LEFT JOIN email_accounts ea ON l.client_id = ea.client_id
                     WHERE {trend_cond}
@@ -1250,7 +1353,7 @@ def get_llm_metrics_endpoint(client_id: str, time_window: str = "all", user: dic
 
                 # 7. Recent Logs (last 30) with thread & email attribution
                 recent_logs_cond = f"WHERE 1=1 {time_filter}" if client_id == "ALL" else f"WHERE l.client_id = %s {time_filter}"
-                recent_logs_params = () if client_id == "ALL" else (client_id,)
+                recent_logs_params = base_filter_params if client_id == "ALL" else client_filter_params
 
                 recent_sql = f"""
                     SELECT 
@@ -1259,12 +1362,13 @@ def get_llm_metrics_endpoint(client_id: str, time_window: str = "all", user: dic
                         l.model_name, 
                         l.prompt_tokens, 
                         l.completion_tokens, 
-                        (l.cost * COALESCE(ea.cost_multiplier, 1.0)) as cost, 
+                        COALESCE(l.billed_cost, l.cost * COALESCE(ea.cost_multiplier, 1.0)) as cost, 
                         l.latency_ms, 
                         l.caller_function, 
                         l.created_at,
                         l.email_log_id,
-                        l.thread_id
+                        l.thread_id,
+                        l.cost as raw_cost
                     FROM llm_logs l
                     LEFT JOIN email_accounts ea ON l.client_id = ea.client_id
                     {recent_logs_cond}
@@ -1291,7 +1395,7 @@ def get_llm_metrics_endpoint(client_id: str, time_window: str = "all", user: dic
                     else:
                         func_display = func_name.replace("_", " ").title()
 
-                    recent_logs.append({
+                    log_entry = {
                         "id": row[0],
                         "provider": row[1],
                         "model_name": row[2],
@@ -1304,11 +1408,16 @@ def get_llm_metrics_endpoint(client_id: str, time_window: str = "all", user: dic
                         "created_at": row[8].strftime("%b %d, %H:%M:%S") if row[8] else "",
                         "email_log_id": row[9],
                         "thread_id": row[10]
-                    })
+                    }
+                    if is_admin:
+                        log_entry["raw_cost"] = float(row[11] or 0.0)
+                        log_entry["margin"] = round(log_entry["cost"] - log_entry["raw_cost"], 5)
+
+                    recent_logs.append(log_entry)
 
                 # 7c. Token Economics Calculation (Grouped by Email & Conversation Lifecycle)
                 email_eco_where = f"WHERE 1=1 {time_filter}" if client_id == "ALL" else f"WHERE l.client_id = %s {time_filter}"
-                email_eco_params = () if client_id == "ALL" else (client_id,)
+                email_eco_params = base_filter_params if client_id == "ALL" else client_filter_params
 
                 # 7c-1: Per-Email Unit Economics (Grouped by email_log_id or fallback to individual request if NULL)
                 cursor.execute(f"""
@@ -1328,7 +1437,7 @@ def get_llm_metrics_endpoint(client_id: str, time_window: str = "all", user: dic
                     FROM (
                         SELECT 
                             COALESCE(l.email_log_id, l.id) as mail_key,
-                            SUM(l.cost * COALESCE(ea.cost_multiplier, 1.0)) as mail_cost,
+                            SUM(COALESCE(l.billed_cost, l.cost * COALESCE(ea.cost_multiplier, 1.0))) as mail_cost,
                             SUM(l.prompt_tokens + l.completion_tokens) as mail_tokens,
                             COUNT(l.id) as api_invocations
                         FROM llm_logs l
@@ -1373,7 +1482,7 @@ def get_llm_metrics_endpoint(client_id: str, time_window: str = "all", user: dic
                     FROM (
                         SELECT 
                             l.thread_id,
-                            SUM(l.cost * COALESCE(ea.cost_multiplier, 1.0)) as t_cost,
+                            SUM(COALESCE(l.billed_cost, l.cost * COALESCE(ea.cost_multiplier, 1.0))) as t_cost,
                             SUM(l.prompt_tokens + l.completion_tokens) as t_tokens,
                             COUNT(DISTINCT COALESCE(l.email_log_id, l.id)) as t_turns,
                             COUNT(l.id) as t_invocations
@@ -1427,7 +1536,7 @@ def get_llm_metrics_endpoint(client_id: str, time_window: str = "all", user: dic
                     FROM (
                         SELECT 
                             l.thread_id,
-                            SUM(l.cost * COALESCE(ea.cost_multiplier, 1.0)) as t_cost,
+                            SUM(COALESCE(l.billed_cost, l.cost * COALESCE(ea.cost_multiplier, 1.0))) as t_cost,
                             SUM(l.prompt_tokens + l.completion_tokens) as t_tokens,
                             COUNT(DISTINCT COALESCE(l.email_log_id, l.id)) as t_turns,
                             COUNT(l.id) as t_invocations
@@ -1467,7 +1576,7 @@ def get_llm_metrics_endpoint(client_id: str, time_window: str = "all", user: dic
                     cursor.execute(f"""
                         SELECT COUNT(*)
                         FROM (
-                            SELECT l.thread_id, SUM(l.cost * COALESCE(ea.cost_multiplier, 1.0)) as t_cost
+                            SELECT l.thread_id, SUM(COALESCE(l.billed_cost, l.cost * COALESCE(ea.cost_multiplier, 1.0))) as t_cost
                             FROM llm_logs l
                             LEFT JOIN email_accounts ea ON l.client_id = ea.client_id
                             LEFT JOIN email_logs e ON l.email_log_id = e.id
@@ -1497,8 +1606,8 @@ def get_llm_metrics_endpoint(client_id: str, time_window: str = "all", user: dic
                         COALESCE(NULLIF(e.intent, ''), 'general_inquiry') as intent_name,
                         COUNT(DISTINCT COALESCE(l.thread_id, l.id)) as conv_count,
                         COALESCE(SUM(l.prompt_tokens + l.completion_tokens), 0) as total_tokens,
-                        COALESCE(SUM(l.cost * COALESCE(ea.cost_multiplier, 1.0)), 0) as total_cost,
-                        COALESCE(AVG(l.cost * COALESCE(ea.cost_multiplier, 1.0)), 0) as avg_cost
+                        COALESCE(SUM(COALESCE(l.billed_cost, l.cost * COALESCE(ea.cost_multiplier, 1.0))), 0) as total_cost,
+                        COALESCE(AVG(COALESCE(l.billed_cost, l.cost * COALESCE(ea.cost_multiplier, 1.0))), 0) as avg_cost
                     FROM llm_logs l
                     LEFT JOIN email_logs e ON l.email_log_id = e.id
                     LEFT JOIN email_accounts ea ON l.client_id = ea.client_id
@@ -1814,6 +1923,8 @@ def _build_report_conditions(
     resolution_mode: Optional[str] = None,
     escalation_reason: Optional[str] = None,
     search: Optional[str] = None,
+    search_field: Optional[str] = "all",
+    week_start_day: str = "monday",
 ):
     where_clauses = ["1=1"]
     params = []
@@ -1822,10 +1933,18 @@ def _build_report_conditions(
         where_clauses.append(f"e.{col} = %s")
         params.append(client_id)
 
+    yw_mode = 0 if week_start_day == "sunday" else 1
+
     if range_type == "today":
         where_clauses.append("e.created_at >= UTC_TIMESTAMP() - INTERVAL 24 HOUR")
     elif range_type == "yesterday":
         where_clauses.append("e.created_at >= UTC_TIMESTAMP() - INTERVAL 48 HOUR AND e.created_at < UTC_TIMESTAMP() - INTERVAL 24 HOUR")
+    elif range_type in ("this_week", "week"):
+        where_clauses.append(f"YEARWEEK(e.created_at, {yw_mode}) = YEARWEEK(UTC_TIMESTAMP(), {yw_mode})")
+    elif range_type == "last_week":
+        where_clauses.append(f"YEARWEEK(e.created_at, {yw_mode}) = YEARWEEK(DATE_SUB(UTC_TIMESTAMP(), INTERVAL 7 DAY), {yw_mode})")
+    elif range_type in ("last_7_days", "7_days"):
+        where_clauses.append("e.created_at >= UTC_TIMESTAMP() - INTERVAL 7 DAY")
     elif range_type == "this_month":
         where_clauses.append("e.created_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL DAYOFMONTH(UTC_TIMESTAMP()) - 1 DAY) - INTERVAL HOUR(UTC_TIMESTAMP()) HOUR - INTERVAL MINUTE(UTC_TIMESTAMP()) MINUTE - INTERVAL SECOND(UTC_TIMESTAMP()) SECOND")
     elif range_type == "last_month":
@@ -1854,9 +1973,129 @@ def _build_report_conditions(
             where_clauses.append("e.status IN ('failed', 'send_failed', 'ticket_creation_failed')")
 
     if search and search.strip():
-        s_term = f"%{search.strip()}%"
-        where_clauses.append("(e.subject LIKE %s OR e.from_email LIKE %s OR e.summary LIKE %s OR e.body LIKE %s)")
-        params.extend([s_term, s_term, s_term, s_term])
+        s = search.strip()
+        s_clean = s.lstrip('#').strip()
+        s_like = f"%{s}%"
+        s_lower = s.lower()
+        sf = (search_field or "all").lower().strip()
+
+        if sf in ("id_thread", "id", "thread"):
+            where_clauses.append("(CAST(e.id AS CHAR) = %s OR e.thread_id LIKE %s OR t.ticket_id LIKE %s)")
+            params.extend([s_clean, s_like, s_like])
+        elif sf in ("timestamp", "date", "time"):
+            where_clauses.append("(CAST(e.created_at AS CHAR) LIKE %s OR DATE_FORMAT(e.created_at, '%%Y-%%m-%%d %%H:%%i:%%s') LIKE %s)")
+            params.extend([s_like, s_like])
+        elif sf in ("customer_email", "email"):
+            where_clauses.append("e.from_email LIKE %s")
+            params.append(s_like)
+        elif sf in ("subject_summary", "subject", "summary"):
+            where_clauses.append("(e.subject LIKE %s OR e.summary LIKE %s OR e.body LIKE %s)")
+            params.extend([s_like, s_like, s_like])
+        elif sf == "intent":
+            where_clauses.append("(e.intent LIKE %s OR t.intent LIKE %s)")
+            params.extend([s_like, s_like])
+        elif sf in ("resolution_mode", "res_mode"):
+            conds = []
+            if any(k in s_lower for k in ("deflect", "rag", "zero")):
+                conds.append("(e.status = 'sent' AND (e.escalation_reason IS NULL OR e.escalation_reason = '') AND t.ticket_id IS NULL)")
+            if any(k in s_lower for k in ("escalat", "ticket", "human")):
+                conds.append("(e.status IN ('ticket_created_and_sent', 'ticket_created_send_failed') OR t.ticket_id IS NOT NULL OR (e.escalation_reason IS NOT NULL AND e.escalation_reason != ''))")
+            if any(k in s_lower for k in ("review", "manual", "held")):
+                conds.append("e.status = 'pending_manual_review'")
+            if any(k in s_lower for k in ("fail", "drop", "error")):
+                conds.append("e.status IN ('failed', 'send_failed', 'ticket_creation_failed')")
+            if any(k in s_lower for k in ("process", "open")):
+                conds.append("(e.status NOT IN ('sent', 'pending_manual_review', 'failed', 'send_failed', 'ticket_creation_failed') AND t.ticket_id IS NULL)")
+            if not conds:
+                conds.append("e.status LIKE %s")
+                params.append(s_like)
+            where_clauses.append(f"({' OR '.join(conds)})")
+        elif sf == "status":
+            conds = []
+            if "resolv" in s_lower or "sent" in s_lower:
+                conds.append("e.status = 'sent'")
+            if "escalat" in s_lower:
+                conds.append("(e.status IN ('ticket_created_and_sent', 'ticket_created_send_failed') OR t.ticket_id IS NOT NULL)")
+            if "review" in s_lower:
+                conds.append("e.status = 'pending_manual_review'")
+            if "fail" in s_lower:
+                conds.append("e.status IN ('failed', 'send_failed', 'ticket_creation_failed')")
+            if "open" in s_lower or "process" in s_lower:
+                conds.append("(e.status NOT IN ('sent', 'pending_manual_review', 'failed', 'send_failed', 'ticket_creation_failed') AND t.ticket_id IS NULL)")
+            if not conds:
+                conds.append("e.status LIKE %s")
+                params.append(s_like)
+            where_clauses.append(f"({' OR '.join(conds)})")
+        elif sf in ("escalation_reason", "reason"):
+            where_clauses.append("(COALESCE(e.escalation_reason, '') LIKE %s OR COALESCE(t.escalation_reason, '') LIKE %s)")
+            params.extend([s_like, s_like])
+        elif sf == "turns":
+            where_clauses.append("CAST(COALESCE(tc.turn_count, 1) AS CHAR) = %s")
+            params.append(s_clean)
+        elif sf == "score":
+            where_clauses.append("CAST(COALESCE(e.score, 80) AS CHAR) = %s")
+            params.append(s_clean)
+        elif sf in ("sentiment_shift", "sentiment"):
+            where_clauses.append("e.sentiment LIKE %s")
+            params.append(s_like)
+        elif sf == "sentiment_score":
+            try:
+                score_val = float(s_clean)
+                if score_val > 0.3:
+                    where_clauses.append("LOWER(COALESCE(e.sentiment, '')) IN ('positive', 'delighted')")
+                elif score_val < -0.3:
+                    where_clauses.append("LOWER(COALESCE(e.sentiment, '')) IN ('negative', 'frustrated')")
+                else:
+                    where_clauses.append("LOWER(COALESCE(e.sentiment, '')) NOT IN ('positive', 'delighted', 'negative', 'frustrated')")
+            except ValueError:
+                where_clauses.append("e.sentiment LIKE %s")
+                params.append(s_like)
+        elif sf in ("tokens", "total_tokens"):
+            where_clauses.append("CAST(COALESCE(lc.thread_total_tokens, 0) AS CHAR) = %s")
+            params.append(s_clean)
+        elif sf in ("latency", "processing_time", "duration"):
+            where_clauses.append("(CAST(COALESCE(lc.thread_latency_ms, 0) AS CHAR) LIKE %s OR CAST(ROUND(COALESCE(lc.thread_latency_ms, 0) / 1000.0, 1) AS CHAR) LIKE %s)")
+            params.extend([s_like, s_like])
+        elif sf in ("cost", "est_cost"):
+            where_clauses.append("(CAST(ROUND(COALESCE(lc.thread_cost, 0.0), 5) AS CHAR) LIKE %s OR CAST(ROUND(COALESCE(lc.raw_thread_cost, 0.0), 5) AS CHAR) LIKE %s)")
+            params.extend([s_like, s_like])
+        else:
+            # Universal Multi-Column Search across all 15 columns
+            clauses = [
+                "CAST(e.id AS CHAR) = %s",
+                "e.thread_id LIKE %s",
+                "t.ticket_id LIKE %s",
+                "CAST(e.created_at AS CHAR) LIKE %s",
+                "e.from_email LIKE %s",
+                "e.subject LIKE %s",
+                "e.summary LIKE %s",
+                "e.body LIKE %s",
+                "e.intent LIKE %s",
+                "t.intent LIKE %s",
+                "e.status LIKE %s",
+                "COALESCE(e.escalation_reason, '') LIKE %s",
+                "COALESCE(t.escalation_reason, '') LIKE %s",
+                "e.sentiment LIKE %s",
+                "CAST(ROUND(COALESCE(lc.thread_cost, 0.0), 5) AS CHAR) LIKE %s",
+                "CAST(ROUND(COALESCE(lc.raw_thread_cost, 0.0), 5) AS CHAR) LIKE %s"
+            ]
+            params.extend([s_clean, s_like, s_like, s_like, s_like, s_like, s_like, s_like, s_like, s_like, s_like, s_like, s_like, s_like, s_like, s_like])
+
+            if s_clean.isdigit():
+                clauses.append("CAST(COALESCE(tc.turn_count, 1) AS CHAR) = %s")
+                clauses.append("CAST(COALESCE(e.score, 80) AS CHAR) = %s")
+                clauses.append("CAST(COALESCE(lc.thread_total_tokens, 0) AS CHAR) = %s")
+                clauses.append("CAST(COALESCE(lc.thread_latency_ms, 0) AS CHAR) = %s")
+                params.extend([s_clean, s_clean, s_clean, s_clean])
+
+            if any(k in s_lower for k in ("deflect", "rag")):
+                clauses.append("(e.status = 'sent' AND (e.escalation_reason IS NULL OR e.escalation_reason = '') AND t.ticket_id IS NULL)")
+            if any(k in s_lower for k in ("escalat", "ticket")):
+                clauses.append("(e.status IN ('ticket_created_and_sent', 'ticket_created_send_failed') OR t.ticket_id IS NOT NULL OR (e.escalation_reason IS NOT NULL AND e.escalation_reason != ''))")
+            if any(k in s_lower for k in ("review", "manual")):
+                clauses.append("e.status = 'pending_manual_review'")
+
+            where_clauses.append(f"({' OR '.join(clauses)})")
 
     return " AND ".join(where_clauses), params
 
@@ -1871,6 +2110,7 @@ def get_ticketing_report_endpoint(
     resolution_mode: Optional[str] = None,
     escalation_reason: Optional[str] = None,
     search: Optional[str] = None,
+    search_field: Optional[str] = "all",
     page: int = 1,
     page_size: int = 25,
     user: dict = Depends(get_current_user)
@@ -1892,9 +2132,26 @@ def get_ticketing_report_endpoint(
                 except Exception:
                     pass
 
+                # Load configured week_start_day
+                week_start_day = "monday"
+                try:
+                    if client_id != "ALL":
+                        cursor.execute("SELECT week_start_day FROM email_accounts WHERE client_id = %s LIMIT 1", (client_id,))
+                        w_r = cursor.fetchone()
+                        if w_r and w_r[0]:
+                            week_start_day = str(w_r[0]).strip().lower()
+                    else:
+                        cursor.execute("SELECT week_start_day FROM email_accounts WHERE week_start_day IS NOT NULL LIMIT 1")
+                        w_r = cursor.fetchone()
+                        if w_r and w_r[0]:
+                            week_start_day = str(w_r[0]).strip().lower()
+                except Exception:
+                    pass
+
                 where_sql, params = _build_report_conditions(
                     client_id, col, range_type, start_date, end_date,
-                    intent, resolution_mode, escalation_reason, search
+                    intent, resolution_mode, escalation_reason, search, search_field,
+                    week_start_day=week_start_day
                 )
 
                 # Count total matching rows and overall report summary metrics
@@ -1907,6 +2164,26 @@ def get_ticketing_report_endpoint(
                         AVG(e.score) as avg_score
                     FROM email_logs e
                     LEFT JOIN ticket_record t ON (t.mail_id = e.message_id OR (t.thread_id = e.thread_id AND e.thread_id IS NOT NULL))
+                    LEFT JOIN (
+                        SELECT thread_id, COUNT(*) as turn_count 
+                        FROM email_logs 
+                        WHERE thread_id IS NOT NULL 
+                        GROUP BY thread_id
+                    ) tc ON e.thread_id = tc.thread_id
+                    LEFT JOIN (
+                        SELECT 
+                            l.thread_id, 
+                            SUM(l.cost) as raw_thread_cost,
+                            SUM(COALESCE(l.billed_cost, l.cost * COALESCE(ea.cost_multiplier, 1.0))) as thread_cost,
+                            SUM(l.prompt_tokens) as thread_prompt_tokens,
+                            SUM(l.completion_tokens) as thread_completion_tokens,
+                            SUM(l.prompt_tokens + l.completion_tokens) as thread_total_tokens,
+                            SUM(l.latency_ms) as thread_latency_ms
+                        FROM llm_logs l
+                        LEFT JOIN email_accounts ea ON l.client_id = ea.client_id
+                        WHERE l.thread_id IS NOT NULL
+                        GROUP BY l.thread_id
+                    ) lc ON e.thread_id = lc.thread_id
                     WHERE {where_sql}
                 """, tuple(params))
                 agg_row = cursor.fetchone()
@@ -1916,7 +2193,7 @@ def get_ticketing_report_endpoint(
                 manual_reviews = int(agg_row[3] or 0) if agg_row else 0
                 avg_score = round(float(agg_row[4] or 0.0), 1) if agg_row and agg_row[4] is not None else 0.0
 
-                # Query paginated rows with pre-aggregated cost and turn counts to avoid correlated subquery overhead
+                # Query paginated rows with pre-aggregated cost, tokens, and turn counts to avoid correlated subquery overhead
                 paginated_params = list(params)
                 paginated_params.extend([page_size, offset])
 
@@ -1947,7 +2224,12 @@ def get_ticketing_report_endpoint(
                         COALESCE(e.score, 80) as score,
                         COALESCE(e.sentiment, 'Neutral') as sentiment,
                         COALESCE(tc.turn_count, 1) as turns,
-                        COALESCE(lc.thread_cost, 0.0) as estimated_cost
+                        COALESCE(lc.thread_cost, 0.0) as estimated_cost,
+                        COALESCE(lc.raw_thread_cost, 0.0) as raw_cost,
+                        COALESCE(lc.thread_total_tokens, 0) as total_tokens,
+                        COALESCE(lc.thread_prompt_tokens, 0) as prompt_tokens,
+                        COALESCE(lc.thread_completion_tokens, 0) as completion_tokens,
+                        COALESCE(lc.thread_latency_ms, 0) as latency_ms
                     FROM email_logs e
                     LEFT JOIN ticket_record t ON (t.mail_id = e.message_id OR (t.thread_id = e.thread_id AND e.thread_id IS NOT NULL))
                     LEFT JOIN (
@@ -1957,7 +2239,14 @@ def get_ticketing_report_endpoint(
                         GROUP BY thread_id
                     ) tc ON e.thread_id = tc.thread_id
                     LEFT JOIN (
-                        SELECT l.thread_id, SUM(l.cost * COALESCE(ea.cost_multiplier, 1.0)) as thread_cost
+                        SELECT 
+                            l.thread_id, 
+                            SUM(l.cost) as raw_thread_cost,
+                            SUM(COALESCE(l.billed_cost, l.cost * COALESCE(ea.cost_multiplier, 1.0))) as thread_cost,
+                            SUM(l.prompt_tokens) as thread_prompt_tokens,
+                            SUM(l.completion_tokens) as thread_completion_tokens,
+                            SUM(l.prompt_tokens + l.completion_tokens) as thread_total_tokens,
+                            SUM(l.latency_ms) as thread_latency_ms
                         FROM llm_logs l
                         LEFT JOIN email_accounts ea ON l.client_id = ea.client_id
                         WHERE l.thread_id IS NOT NULL
@@ -1969,11 +2258,14 @@ def get_ticketing_report_endpoint(
                 """, tuple(paginated_params))
                 rows = cursor.fetchall()
 
+                is_admin = (user.get("role") == "admin")
                 records = []
                 for r in rows:
-                    r_id, th_id, dt, from_em, subj, summary_txt, intent_str, res_mode, st_label, esc_reason, score_val, sent_val, turns_cnt, cost_val = r
+                    r_id, th_id, dt, from_em, subj, summary_txt, intent_str, res_mode, st_label, esc_reason, score_val, sent_val, turns_cnt, cost_val, raw_cost_val, tot_tokens_val, prompt_tokens_val, comp_tokens_val, latency_ms_val = r
                     cost_flt = round(float(cost_val or 0.0), 5)
+                    raw_flt = round(float(raw_cost_val or 0.0), 5)
                     sent_clean = (sent_val or "Neutral").strip().capitalize()
+                    latency_int = int(latency_ms_val or 0)
 
                     # Derive sentiment trajectory shift and sentiment score (-1.0 to 1.0)
                     if sent_clean.lower() in ('positive', 'delighted'):
@@ -1992,7 +2284,7 @@ def get_ticketing_report_endpoint(
                     else:
                         shift = f"{sent_clean} → In Progress"
 
-                    records.append({
+                    rec = {
                         "id": r_id,
                         "thread_id": th_id,
                         "timestamp": dt.strftime("%Y-%m-%d %H:%M:%S") if dt else "",
@@ -2008,8 +2300,19 @@ def get_ticketing_report_endpoint(
                         "sentiment": sent_clean,
                         "sentiment_shift": shift,
                         "sentiment_score": sentiment_numeric,
-                        "estimated_cost": cost_flt
-                    })
+                        "total_tokens": int(tot_tokens_val or 0),
+                        "prompt_tokens": int(prompt_tokens_val or 0),
+                        "completion_tokens": int(comp_tokens_val or 0),
+                        "latency_ms": latency_int,
+                        "latency_sec": round(latency_int / 1000.0, 2),
+                        "estimated_cost": cost_flt,
+                        "billed_cost": cost_flt
+                    }
+                    if is_admin:
+                        rec["raw_cost"] = raw_flt
+                        rec["margin"] = round(cost_flt - raw_flt, 5)
+
+                    records.append(rec)
 
                 total_pages = (total_rows + page_size - 1) // page_size if total_rows > 0 else 1
 
@@ -2047,19 +2350,31 @@ def export_ticketing_report_endpoint(
     resolution_mode: Optional[str] = None,
     escalation_reason: Optional[str] = None,
     search: Optional[str] = None,
+    search_field: Optional[str] = "all",
     user: dict = Depends(get_current_user)
 ):
     require_client_access(client_id, user)
 
+    is_admin = (user.get("role") == "admin")
+
     def iter_csv():
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow([
-            "ID", "Thread ID", "Timestamp (UTC)", "Customer Email", "Subject",
-            "Summary of Issue", "Technical Intent", "Resolution Mode", "Status",
-            "Escalation Reason", "Total Turns", "Confidence Score", "Sentiment",
-            "Sentiment Trajectory", "Sentiment Score (-1 to 1)", "Estimated Cost ($)"
-        ])
+        if is_admin:
+            writer.writerow([
+                "ID", "Thread ID", "Timestamp (UTC)", "Customer Email", "Subject",
+                "Summary of Issue", "Technical Intent", "Resolution Mode", "Status",
+                "Escalation Reason", "Total Turns", "Confidence Score", "Sentiment",
+                "Sentiment Trajectory", "Sentiment Score (-1 to 1)", "Total Tokens",
+                "Prompt Tokens", "Completion Tokens", "Latency (ms)", "Processing Time (s)", "Raw Cost ($)", "Billed Cost ($)", "Margin ($)"
+            ])
+        else:
+            writer.writerow([
+                "ID", "Thread ID", "Timestamp (UTC)", "Customer Email", "Subject",
+                "Summary of Issue", "Technical Intent", "Resolution Mode", "Status",
+                "Escalation Reason", "Total Turns", "Confidence Score", "Sentiment",
+                "Sentiment Trajectory", "Sentiment Score (-1 to 1)", "Tokens", "Processing Time (s)", "Estimated Cost ($)"
+            ])
         yield output.getvalue()
         output.seek(0)
         output.truncate(0)
@@ -2075,9 +2390,26 @@ def export_ticketing_report_endpoint(
                 except Exception:
                     pass
 
+                # Load configured week_start_day
+                week_start_day = "monday"
+                try:
+                    if client_id != "ALL":
+                        cursor.execute("SELECT week_start_day FROM email_accounts WHERE client_id = %s LIMIT 1", (client_id,))
+                        w_r = cursor.fetchone()
+                        if w_r and w_r[0]:
+                            week_start_day = str(w_r[0]).strip().lower()
+                    else:
+                        cursor.execute("SELECT week_start_day FROM email_accounts WHERE week_start_day IS NOT NULL LIMIT 1")
+                        w_r = cursor.fetchone()
+                        if w_r and w_r[0]:
+                            week_start_day = str(w_r[0]).strip().lower()
+                except Exception:
+                    pass
+
                 where_sql, params = _build_report_conditions(
                     client_id, col, range_type, start_date, end_date,
-                    intent, resolution_mode, escalation_reason, search
+                    intent, resolution_mode, escalation_reason, search, search_field,
+                    week_start_day=week_start_day
                 )
 
                 cursor.execute(f"""
@@ -2107,7 +2439,12 @@ def export_ticketing_report_endpoint(
                         COALESCE(e.score, 80) as score,
                         COALESCE(e.sentiment, 'Neutral') as sentiment,
                         COALESCE(tc.turn_count, 1) as turns,
-                        COALESCE(lc.thread_cost, 0.0) as estimated_cost
+                        COALESCE(lc.thread_cost, 0.0) as estimated_cost,
+                        COALESCE(lc.raw_thread_cost, 0.0) as raw_cost,
+                        COALESCE(lc.thread_total_tokens, 0) as total_tokens,
+                        COALESCE(lc.thread_prompt_tokens, 0) as prompt_tokens,
+                        COALESCE(lc.thread_completion_tokens, 0) as completion_tokens,
+                        COALESCE(lc.thread_latency_ms, 0) as latency_ms
                     FROM email_logs e
                     LEFT JOIN ticket_record t ON (t.mail_id = e.message_id OR (t.thread_id = e.thread_id AND e.thread_id IS NOT NULL))
                     LEFT JOIN (
@@ -2117,7 +2454,14 @@ def export_ticketing_report_endpoint(
                         GROUP BY thread_id
                     ) tc ON e.thread_id = tc.thread_id
                     LEFT JOIN (
-                        SELECT l.thread_id, SUM(l.cost * COALESCE(ea.cost_multiplier, 1.0)) as thread_cost
+                        SELECT 
+                            l.thread_id, 
+                            SUM(l.cost) as raw_thread_cost,
+                            SUM(COALESCE(l.billed_cost, l.cost * COALESCE(ea.cost_multiplier, 1.0))) as thread_cost,
+                            SUM(l.prompt_tokens) as thread_prompt_tokens,
+                            SUM(l.completion_tokens) as thread_completion_tokens,
+                            SUM(l.prompt_tokens + l.completion_tokens) as thread_total_tokens,
+                            SUM(l.latency_ms) as thread_latency_ms
                         FROM llm_logs l
                         LEFT JOIN email_accounts ea ON l.client_id = ea.client_id
                         WHERE l.thread_id IS NOT NULL
@@ -2132,9 +2476,12 @@ def export_ticketing_report_endpoint(
                     if not batch:
                         break
                     for r in batch:
-                        r_id, th_id, dt, from_em, subj, summary_txt, intent_str, res_mode, st_label, esc_reason, score_val, sent_val, turns_cnt, cost_val = r
+                        r_id, th_id, dt, from_em, subj, summary_txt, intent_str, res_mode, st_label, esc_reason, score_val, sent_val, turns_cnt, cost_val, raw_cost_val, tot_tokens_val, prompt_tokens_val, comp_tokens_val, latency_ms_val = r
                         cost_flt = round(float(cost_val or 0.0), 5)
+                        raw_flt = round(float(raw_cost_val or 0.0), 5)
                         sent_clean = (sent_val or "Neutral").strip().capitalize()
+                        latency_int = int(latency_ms_val or 0)
+                        latency_sec = round(latency_int / 1000.0, 2)
 
                         if sent_clean.lower() in ('positive', 'delighted'):
                             sentiment_score = 1.0
@@ -2152,24 +2499,53 @@ def export_ticketing_report_endpoint(
                         else:
                             shift = f"{sent_clean} -> In Progress"
 
-                        writer.writerow([
-                            r_id,
-                            th_id,
-                            dt.strftime("%Y-%m-%d %H:%M:%S") if dt else "",
-                            from_em or "",
-                            subj or "",
-                            summary_txt or "",
-                            intent_str,
-                            res_mode,
-                            st_label,
-                            esc_reason if esc_reason != 'None' else "None",
-                            max(1, int(turns_cnt or 1)),
-                            int(score_val or 80),
-                            sent_clean,
-                            shift,
-                            sentiment_score,
-                            cost_flt
-                        ])
+                        if is_admin:
+                            writer.writerow([
+                                r_id,
+                                th_id,
+                                dt.strftime("%Y-%m-%d %H:%M:%S") if dt else "",
+                                from_em or "",
+                                subj or "",
+                                summary_txt or "",
+                                intent_str,
+                                res_mode,
+                                st_label,
+                                esc_reason if esc_reason != 'None' else "None",
+                                max(1, int(turns_cnt or 1)),
+                                int(score_val or 80),
+                                sent_clean,
+                                shift,
+                                sentiment_score,
+                                int(tot_tokens_val or 0),
+                                int(prompt_tokens_val or 0),
+                                int(comp_tokens_val or 0),
+                                latency_int,
+                                latency_sec,
+                                raw_flt,
+                                cost_flt,
+                                round(cost_flt - raw_flt, 5)
+                            ])
+                        else:
+                            writer.writerow([
+                                r_id,
+                                th_id,
+                                dt.strftime("%Y-%m-%d %H:%M:%S") if dt else "",
+                                from_em or "",
+                                subj or "",
+                                summary_txt or "",
+                                intent_str,
+                                res_mode,
+                                st_label,
+                                esc_reason if esc_reason != 'None' else "None",
+                                max(1, int(turns_cnt or 1)),
+                                int(score_val or 80),
+                                sent_clean,
+                                shift,
+                                sentiment_score,
+                                int(tot_tokens_val or 0),
+                                latency_sec,
+                                cost_flt
+                            ])
                         yield output.getvalue()
                         output.seek(0)
                         output.truncate(0)

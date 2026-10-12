@@ -376,6 +376,7 @@ def _finalize_task_and_log(ctx: PipelineContext, task_id: str, cursor=None, db=N
                     in_reply_to=ctx.message_id,
                     message_id=ctx.message_id,
                     sender_name=ctx.sender_name,
+                    thread_id=ctx.thread_id,
                 )
                 logger.info(f"📝 Auto-created Pending Review draft in draft_emails for log_id {log_id}")
             except Exception as draft_err:

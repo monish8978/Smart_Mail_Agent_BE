@@ -129,6 +129,7 @@ class SelfProfileRequest(BaseModel):
     agent_type: Optional[str] = None
     response_tone: Optional[str] = None
     inactivity_timeout_hours: Optional[int] = None
+    week_start_day: Optional[str] = None
 
 
 @router.post("/client/profile")
@@ -156,6 +157,11 @@ def update_self_profile(data: SelfProfileRequest, user: dict = Depends(get_curre
             if data.inactivity_timeout_hours is not None:
                 updates.append("inactivity_timeout_hours = %s")
                 params.append(data.inactivity_timeout_hours)
+            if data.week_start_day is not None:
+                val = data.week_start_day.lower().strip()
+                if val in ("monday", "sunday"):
+                    updates.append("week_start_day = %s")
+                    params.append(val)
             
             if updates:
                 if data.client_id == "ALL" and user.get("role") == "admin":

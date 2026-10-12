@@ -180,15 +180,16 @@ def get_email_account_by_id(client_id: str, request: Request):
 def get_all_email_accounts_endpoint(user: dict = Depends(require_admin())):
     try:
         import pymysql
+        from app.email_credential import _decrypt_imap_password
         with get_db_ctx() as db:
             cursor = db.cursor(pymysql.cursors.DictCursor)
             cursor.execute("""
                 SELECT 
                     u.client_id, 
-                    u.email AS email, 
+                    COALESCE(ea.email, '') AS email, 
                     COALESCE(ea.password, '') AS password,
                     u.email AS login_email,
-                    COALESCE(ea.email, u.email) AS imap_email,
+                    COALESCE(ea.email, '') AS imap_email,
                     COALESCE(ea.password, '') AS imap_password,
                     u.name,
                     u.phone_number,
@@ -210,6 +211,11 @@ def get_all_email_accounts_endpoint(user: dict = Depends(require_admin())):
             """)
             rows = cursor.fetchall()
             for r in rows:
+                cid = r.get("client_id")
+                raw_pw = r.get("password") or ""
+                decrypted_pw = _decrypt_imap_password(raw_pw, client_id=cid) if raw_pw else ""
+                r["password"] = decrypted_pw
+                r["imap_password"] = decrypted_pw
                 r["feature_ticket_creation"] = bool(r.get("feature_ticket_creation", 1))
                 r["feature_auto_send"] = bool(r.get("feature_auto_send", 1))
                 r["feature_rag"] = bool(r.get("feature_rag", 1))

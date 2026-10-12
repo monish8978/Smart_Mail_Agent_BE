@@ -65,20 +65,22 @@ def get_email_account(client_id: str) -> dict:
         with db.cursor() as cursor:
             if client_id == "ALL":
                 cursor.execute("""
-                    SELECT score_threshold FROM email_accounts ORDER BY id ASC LIMIT 1
+                    SELECT score_threshold, week_start_day FROM email_accounts ORDER BY id ASC LIMIT 1
                 """)
                 row = cursor.fetchone()
                 thresh = row[0] if row and row[0] is not None else 80
+                wsd = row[1] if row and len(row) > 1 and row[1] else "monday"
                 return {
                     "client_id": "ALL",
                     "score_threshold": thresh,
                     "response_tone": "Formal",
-                    "agent_type": "customer_support_agent"
+                    "agent_type": "customer_support_agent",
+                    "week_start_day": wsd
                 }
 
             cursor.execute("""
                 SELECT client_id, email, password, score_threshold, response_tone,
-                       agent_type, department_name, company_name
+                       agent_type, department_name, company_name, week_start_day
                 FROM email_accounts WHERE client_id = %s LIMIT 1
             """, (client_id,))
             row = cursor.fetchone()
@@ -94,6 +96,7 @@ def get_email_account(client_id: str) -> dict:
                 "agent_type":      row[5] if row[5] is not None else "customer_support_agent",
                 "department_name": row[6] if row[6] is not None else None,
                 "company_name":    row[7] if row[7] is not None else None,
+                "week_start_day":  row[8] if len(row) > 8 and row[8] else "monday",
             }
 
 
@@ -169,6 +172,7 @@ def ensure_accounts_table_startup(cursor):
         ("alert_on_sla_breach", "BOOLEAN DEFAULT TRUE"),
         ("alert_on_worker_stall", "BOOLEAN DEFAULT TRUE"),
         ("alert_sla_hours", "INT DEFAULT 4"),
+        ("week_start_day", "VARCHAR(10) DEFAULT 'monday'"),
     ]
 
     for col_name, col_def in missing_cols:
@@ -290,7 +294,7 @@ def get_budget_status(client_id, cursor):
     # MTD Spend and Tokens
     spend_query = """
         SELECT 
-            COALESCE(SUM(l.cost * COALESCE(ea.cost_multiplier, 1.0)), 0) as mtd_cost,
+            COALESCE(SUM(COALESCE(l.billed_cost, l.cost * COALESCE(ea.cost_multiplier, 1.0))), 0) as mtd_cost,
             COALESCE(SUM(l.prompt_tokens + l.completion_tokens), 0) as mtd_tokens
         FROM llm_logs l
         LEFT JOIN email_accounts ea ON l.client_id = ea.client_id
@@ -310,7 +314,7 @@ def get_budget_status(client_id, cursor):
     daily_query = """
         SELECT 
             DATE(l.created_at) as log_day,
-            SUM(l.cost * COALESCE(ea.cost_multiplier, 1.0)) as day_cost,
+            SUM(COALESCE(l.billed_cost, l.cost * COALESCE(ea.cost_multiplier, 1.0))) as day_cost,
             SUM(l.prompt_tokens + l.completion_tokens) as day_tokens
         FROM llm_logs l
         LEFT JOIN email_accounts ea ON l.client_id = ea.client_id

@@ -104,7 +104,14 @@ def accept_email(data: AcceptEmailRequest, user: dict = Depends(get_current_user
 
 
 @router.get("/emails/{client_id}")
-def get_emails_logs_endpoint(client_id: str, user: dict = Depends(get_current_user)):
+def get_emails_logs_endpoint(
+    client_id: str,
+    page: Optional[int] = None,
+    page_size: Optional[int] = 25,
+    search: Optional[str] = None,
+    status: Optional[str] = None,
+    user: dict = Depends(get_current_user)
+):
     require_client_access(client_id, user)
     try:
         with get_db_ctx() as db:
@@ -118,20 +125,72 @@ def get_emails_logs_endpoint(client_id: str, user: dict = Depends(get_current_us
                 except Exception as ex:
                     logger.warning(f"⚠️ Could not describe email_logs: {ex}")
 
-                if client_id == "ALL":
-                    cursor.execute(f"""
-                        SELECT id, from_email, subject, body, reply, score, status, created_at, rag_id, sentiment, priority, execution_steps, summary, body_html, {col} as client_id 
-                        FROM email_logs 
-                        ORDER BY created_at DESC
-                    """)
+                # Unpaginated fallback (for Dashboard, Inbox, etc.)
+                if page is None:
+                    if client_id == "ALL":
+                        cursor.execute(f"""
+                            SELECT id, from_email, subject, body, reply, score, status, created_at, rag_id, sentiment, priority, execution_steps, summary, body_html, {col} as client_id, thread_id, intent 
+                            FROM email_logs 
+                            ORDER BY created_at DESC
+                        """)
+                    else:
+                        cursor.execute(f"""
+                            SELECT id, from_email, subject, body, reply, score, status, created_at, rag_id, sentiment, priority, execution_steps, summary, body_html, {col} as client_id, thread_id, intent 
+                            FROM email_logs 
+                            WHERE {col} = %s 
+                            ORDER BY created_at DESC
+                        """, (client_id,))
+                    rows = cursor.fetchall()
+                    total_count = len(rows)
                 else:
-                    cursor.execute(f"""
-                        SELECT id, from_email, subject, body, reply, score, status, created_at, rag_id, sentiment, priority, execution_steps, summary, body_html, {col} as client_id 
+                    # Server-side paginated path (for AiProcessing)
+                    conditions = []
+                    params = []
+
+                    if client_id != "ALL":
+                        conditions.append(f"{col} = %s")
+                        params.append(client_id)
+
+                    if status and status != "all":
+                        if status == "sent":
+                            conditions.append("status = 'sent'")
+                        elif status == "ticket":
+                            conditions.append("status = 'ticket_created_and_sent'")
+                        elif status == "failed":
+                            conditions.append("(status LIKE '%failed%' OR status = 'failed')")
+
+                    if search and search.strip():
+                        s_clean = search.strip()
+                        s_term = f"%{s_clean}%"
+                        num_part = s_clean.lstrip("#") if s_clean.startswith("#") else (s_clean if s_clean.isdigit() else None)
+                        if num_part and num_part.isdigit():
+                            conditions.append("(id = %s OR thread_id LIKE %s OR from_email LIKE %s OR subject LIKE %s OR body LIKE %s OR intent LIKE %s OR sentiment LIKE %s)")
+                            params.extend([int(num_part), s_term, s_term, s_term, s_term, s_term, s_term])
+                        else:
+                            conditions.append("(thread_id LIKE %s OR from_email LIKE %s OR subject LIKE %s OR body LIKE %s OR intent LIKE %s OR sentiment LIKE %s OR CAST(id AS CHAR) LIKE %s)")
+                            params.extend([s_term, s_term, s_term, s_term, s_term, s_term, s_term])
+
+                    where_sql = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+
+                    # Count total matching rows
+                    count_query = f"SELECT COUNT(*) FROM email_logs{where_sql}"
+                    cursor.execute(count_query, tuple(params))
+                    total_count = cursor.fetchone()[0]
+
+                    p = max(1, page)
+                    ps = max(1, min(100, page_size or 25))
+                    offset = (p - 1) * ps
+
+                    query_sql = f"""
+                        SELECT id, from_email, subject, body, reply, score, status, created_at, rag_id, sentiment, priority, execution_steps, summary, body_html, {col} as client_id, thread_id, intent 
                         FROM email_logs 
-                        WHERE {col} = %s 
+                        {where_sql}
                         ORDER BY created_at DESC
-                    """, (client_id,))
-                rows = cursor.fetchall()
+                        LIMIT %s OFFSET %s
+                    """
+                    item_params = list(params) + [ps, offset]
+                    cursor.execute(query_sql, tuple(item_params))
+                    rows = cursor.fetchall()
 
                 emails_list = []
                 for r in rows:
@@ -178,16 +237,60 @@ def get_emails_logs_endpoint(client_id: str, user: dict = Depends(get_current_us
                         "execution_steps": steps,
                         "summary": r[12] if len(r) > 12 and r[12] else "",
                         "body_html": r[13] if len(r) > 13 and r[13] else None,
-                        "client_id": r[14] if len(r) > 14 else None
+                        "client_id": r[14] if len(r) > 14 else None,
+                        "thread_id": r[15] if len(r) > 15 and r[15] else None,
+                        "intent": r[16] if len(r) > 16 and r[16] else "general_support"
                     })
-                return emails_list
+
+                if page is None:
+                    return emails_list
+
+                # KPI summary metrics for tenant
+                metric_where = f"WHERE {col} = %s" if client_id != "ALL" else ""
+                metric_params = (client_id,) if client_id != "ALL" else ()
+                cursor.execute(f"""
+                    SELECT 
+                        COUNT(*), 
+                        SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END), 
+                        SUM(CASE WHEN status = 'ticket_created_and_sent' THEN 1 ELSE 0 END), 
+                        AVG(score) 
+                    FROM email_logs 
+                    {metric_where}
+                """, metric_params)
+                m_row = cursor.fetchone()
+                metrics = {
+                    "total": m_row[0] or 0,
+                    "auto_sent": int(m_row[1] or 0),
+                    "ticketed": int(m_row[2] or 0),
+                    "avg_score": round(float(m_row[3] or 0)) if m_row[3] is not None else 0
+                }
+
+                ps = max(1, min(100, page_size or 25))
+                p = max(1, page)
+                return {
+                    "items": emails_list,
+                    "total": total_count,
+                    "page": p,
+                    "page_size": ps,
+                    "total_pages": max(1, (total_count + ps - 1) // ps),
+                    "metrics": metrics
+                }
     except Exception as e:
         logger.error(f"❌ Failed to fetch emails logs: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/tickets/{client_id}")
-def get_tickets_logs_endpoint(client_id: str, user: dict = Depends(get_current_user)):
+def get_tickets_logs_endpoint(
+    client_id: str,
+    page: Optional[int] = None,
+    page_size: Optional[int] = 25,
+    search: Optional[str] = None,
+    status: Optional[str] = None,
+    priority: Optional[str] = None,
+    intent: Optional[str] = None,
+    user: dict = Depends(get_current_user)
+):
     require_client_access(client_id, user)
     try:
         with get_db_ctx() as db:
@@ -206,26 +309,113 @@ def get_tickets_logs_endpoint(client_id: str, user: dict = Depends(get_current_u
                 except Exception as ex:
                     logger.warning(f"⚠️ Could not describe ticket_record: {ex}")
 
-                if client_id == "ALL":
-                    cursor.execute("""
-                        SELECT ticket_id, mail_id, subject, body, status, created_at, sentiment, priority 
-                        FROM ticket_record 
-                        ORDER BY created_at DESC
-                    """)
+                from_and_join = """
+                    FROM ticket_record t
+                    LEFT JOIN email_logs e ON e.id = (
+                        SELECT e2.id 
+                        FROM email_logs e2 
+                        WHERE (e2.message_id = t.mail_id AND t.mail_id IS NOT NULL AND t.mail_id != '')
+                           OR (t.thread_id IS NOT NULL AND t.thread_id != '' AND e2.thread_id = t.thread_id)
+                           OR (t.mail_id = CONCAT('msg-', e2.id))
+                           OR (t.ticket_id = CAST(e2.id AS CHAR))
+                        ORDER BY e2.id DESC
+                        LIMIT 1
+                    )
+                """
+
+                base_query = f"""
+                    SELECT 
+                        t.ticket_id, 
+                        t.mail_id, 
+                        t.subject, 
+                        t.body, 
+                        t.status, 
+                        t.created_at, 
+                        t.sentiment, 
+                        t.priority,
+                        COALESCE(NULLIF(t.intent, ''), e.intent, 'general_support') as intent,
+                        COALESCE(NULLIF(e.from_email, ''), '') as customer_email,
+                        e.id as email_log_id,
+                        COALESCE(t.thread_id, e.thread_id) as thread_id
+                    {from_and_join}
+                """
+
+                # Unpaginated fallback (for existing callers)
+                if page is None:
+                    if client_id == "ALL":
+                        cursor.execute(f"{base_query} ORDER BY t.created_at DESC")
+                    else:
+                        cursor.execute(f"{base_query} WHERE t.{col} = %s ORDER BY t.created_at DESC", (client_id,))
+                    rows = cursor.fetchall()
+                    total_count = len(rows)
                 else:
-                    cursor.execute(f"""
-                        SELECT ticket_id, mail_id, subject, body, status, created_at, sentiment, priority 
-                        FROM ticket_record 
-                        WHERE {col} = %s 
-                        ORDER BY created_at DESC
-                    """, (client_id,))
-                rows = cursor.fetchall()
+                    # Paginated and filtered path
+                    conditions = []
+                    params = []
+
+                    if client_id != "ALL":
+                        conditions.append(f"t.{col} = %s")
+                        params.append(client_id)
+
+                    if status and status != "all":
+                        conditions.append("t.status = %s")
+                        params.append(status)
+
+                    if priority and priority != "all":
+                        conditions.append("t.priority = %s")
+                        params.append(priority)
+
+                    if intent and intent != "all":
+                        conditions.append("(t.intent = %s OR e.intent = %s)")
+                        params.extend([intent, intent])
+
+                    if search and search.strip():
+                        s_clean = search.strip()
+                        s_term = f"%{s_clean}%"
+                        num_part = s_clean.lstrip("#") if s_clean.startswith("#") else (s_clean if s_clean.isdigit() else None)
+                        if num_part and num_part.isdigit():
+                            conditions.append("(t.ticket_id LIKE %s OR e.id = %s OR t.subject LIKE %s OR t.body LIKE %s OR e.from_email LIKE %s OR COALESCE(t.thread_id, e.thread_id) LIKE %s OR t.mail_id LIKE %s)")
+                            params.extend([s_term, int(num_part), s_term, s_term, s_term, s_term, s_term])
+                        else:
+                            conditions.append("(t.ticket_id LIKE %s OR t.subject LIKE %s OR t.body LIKE %s OR e.from_email LIKE %s OR COALESCE(t.thread_id, e.thread_id) LIKE %s OR t.mail_id LIKE %s OR t.intent LIKE %s OR e.intent LIKE %s)")
+                            params.extend([s_term, s_term, s_term, s_term, s_term, s_term, s_term, s_term])
+
+                    where_sql = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+
+                    # Count total records
+                    count_sql = f"SELECT COUNT(*) {from_and_join} {where_sql}"
+                    cursor.execute(count_sql, tuple(params))
+                    total_count = cursor.fetchone()[0]
+
+                    p = max(1, page)
+                    ps = max(1, min(100, page_size or 25))
+                    offset = (p - 1) * ps
+
+                    query_sql = f"{base_query} {where_sql} ORDER BY t.created_at DESC LIMIT %s OFFSET %s"
+                    item_params = list(params) + [ps, offset]
+                    cursor.execute(query_sql, tuple(item_params))
+                    rows = cursor.fetchall()
 
                 tickets_list = []
                 for r in rows:
+                    raw_mail = r[1] or ""
+                    cust_email = r[9] or ""
+                    if not cust_email:
+                        if "@" in raw_mail and not raw_mail.startswith("<") and not raw_mail.startswith("msg-"):
+                            cust_email = raw_mail
+                        else:
+                            cust_email = "Unknown Customer"
+
                     tickets_list.append({
                         "id": r[0],
                         "mailId": r[1],
+                        "customer_email": cust_email,
+                        "customerEmail": cust_email,
+                        "email_log_id": r[10],
+                        "emailLogId": r[10],
+                        "thread_id": r[11],
+                        "threadId": r[11],
+                        "intent": r[8] or "general_support",
                         "subject": r[2],
                         "preview": r[3],
                         "status": r[4],
@@ -234,7 +424,40 @@ def get_tickets_logs_endpoint(client_id: str, user: dict = Depends(get_current_u
                         "time": r[5].strftime("%I:%M %p") if r[5] else "Just Now",
                         "date_str": r[5].strftime("%Y-%m-%d %I:%M %p") if r[5] else ""
                     })
-                return tickets_list
+
+                if page is None:
+                    return tickets_list
+
+                # KPI summary metrics for tenant
+                m_where = f"WHERE t.{col} = %s" if client_id != "ALL" else ""
+                m_params = (client_id,) if client_id != "ALL" else ()
+                cursor.execute(f"""
+                    SELECT 
+                        COUNT(*),
+                        SUM(CASE WHEN t.status = 'Ticket_Generated' THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN t.status = 'Done_Replied' THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN t.priority IN ('Critical', 'High') THEN 1 ELSE 0 END)
+                    FROM ticket_record t
+                    {m_where}
+                """, m_params)
+                tm_row = cursor.fetchone()
+                metrics = {
+                    "total": tm_row[0] or 0,
+                    "pending": int(tm_row[1] or 0),
+                    "resolved": int(tm_row[2] or 0),
+                    "urgent": int(tm_row[3] or 0)
+                }
+
+                ps = max(1, min(100, page_size or 25))
+                p = max(1, page)
+                return {
+                    "items": tickets_list,
+                    "total": total_count,
+                    "page": p,
+                    "page_size": ps,
+                    "total_pages": max(1, (total_count + ps - 1) // ps),
+                    "metrics": metrics
+                }
     except Exception as e:
         logger.error(f"❌ Failed to fetch tickets list: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
